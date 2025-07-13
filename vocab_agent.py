@@ -7,6 +7,11 @@ import os
 
 from dotenv import load_dotenv
 load_dotenv(override=True)
+os.environ["LANGSMITH_TRACING"] = "true"
+os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
+os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGSMITH_PROJECT", "polynot")
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 
 # =========== LLM ===========
 llm = ChatOpenAI(
@@ -54,7 +59,7 @@ if __name__ == '__main__':
 	messages = [
     (
         "system",
-        "You are a helpful assistant that translates English to French. Translate the user sentence.",
+        "You are a helpful assistant that translates English to Vietnamese. Translate the user sentence.",
     ),
     ("human", "I love programming."),
 ]
