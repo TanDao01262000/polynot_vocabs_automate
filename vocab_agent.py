@@ -145,40 +145,27 @@ def run_continuous_vocab_generation(
             print(f"BATCH #{batch_count} - TOPIC: {current_topic} ({topic_index + 1}/{len(topic_list)})")
             print(f"{'='*60}")
             
-            # Get existing combinations to avoid duplicates
+            # Get existing combinations for content polling (not for filtering AI output)
             existing_combinations = get_existing_combinations_for_topic(current_topic)
             print(f"Found {len(existing_combinations)} existing combinations in database")
             
-            # Create comprehensive prompt
-            if existing_combinations:
-                existing_words_str = ", ".join([f"{combo[0]} ({combo[2]})" for combo in existing_combinations[:20]])
-                prompt = f'''Based on the topic of {current_topic}, generate:
+            # Create simplified, focused prompt
+            prompt = f'''You are an expert language teacher creating engaging vocabulary content for {current_topic}.
 
-1. {vocab_per_batch} NEW vocabularies (nouns, verbs, adjectives, adverbs)
-2. {phrasal_verbs_per_batch} NEW phrasal verbs
-3. {idioms_per_batch} NEW idioms
+Generate diverse and interesting vocabulary for CEFR level {level.value}:
 
-At CEFR level {level.value}. Original language is {original_language}. Target language is {target_language}.
-
-CRITICAL: You MUST avoid these existing words completely: {existing_words_str}
-
-Instructions:
-1. Generate ONLY words that are NOT in the existing list above
-2. Focus on different aspects of {current_topic}
-3. Include a variety of parts of speech
-4. Be creative and think of less common but relevant vocabulary
-5. For phrasal verbs, focus on common combinations used in {current_topic} context
-6. For idioms, include expressions commonly used when discussing {current_topic}
-
-For each entry, specify the part of speech (noun, verb, adjective, adverb, phrasal_verb, idiom, phrase).'''
-            else:
-                prompt = f'''Based on the topic of {current_topic}, generate:
-
-1. {vocab_per_batch} vocabularies (nouns, verbs, adjectives, adverbs)
-2. {phrasal_verbs_per_batch} phrasal verbs
+1. {vocab_per_batch} vocabulary words (nouns, verbs, adjectives, adverbs)
+2. {phrasal_verbs_per_batch} phrasal verbs  
 3. {idioms_per_batch} idioms
 
-At CEFR level {level.value}. Original language is {original_language}. Target language is {target_language}.
+Target language: {target_language}
+Source language: {original_language}
+
+Focus on:
+- Practical, commonly used words for {current_topic}
+- Interesting and engaging vocabulary that learners will find useful
+- A good mix of difficulty levels within {level.value}
+- Cultural relevance and real-world usage
 
 For each entry, specify the part of speech (noun, verb, adjective, adverb, phrasal_verb, idiom, phrase).'''
             
@@ -202,7 +189,7 @@ For each entry, specify the part of speech (noun, verb, adjective, adverb, phras
                     pos = entry.part_of_speech.value if entry.part_of_speech else "unknown"
                     print(f"  {i+1}. {entry.word} ({pos}): {entry.definition}")
                 
-                # Filter duplicates before saving
+                # Filter duplicates before saving (for database integrity, not AI output)
                 filtered_entries = filter_duplicates(all_entries, existing_combinations)
                 
                 if filtered_entries:
@@ -296,42 +283,3 @@ def run_single_topic_generation(
         save_topic_list=save_topic_list,
         topic_list_name=topic_list_name
     )
-
-if __name__ == '__main__':
-    # Example 1: Generate for a specific category (not saved)
-    # print("=== Example 1: Daily Life Topics ===")
-    # run_continuous_vocab_generation(
-    #     category="daily_life",
-    #     level=CEFRLevel.A2,
-    #     vocab_per_batch=8,
-    #     phrasal_verbs_per_batch=4,
-    #     idioms_per_batch=3,
-    #     delay_seconds=2
-    # )
-    
-    # Example 2: Generate for custom topics and save the list
-    print("\n=== Example 2: Custom Topics (Saved) ===")
-    run_continuous_vocab_generation(
-        topics=["gameshow", "video game", "music"],
-        level=CEFRLevel.B1,
-        vocab_per_batch=15,
-        phrasal_verbs_per_batch=3,
-        idioms_per_batch=2,
-        delay_seconds=1,
-        save_topic_list=True,  # Save this custom list
-        topic_list_name="my_custom_list"
-    )
-    
-    # Example 3: View saved topic lists
-    print("\n=== Example 3: View Saved Topic Lists ===")
-    view_saved_topic_lists()
-    
-    # Example 4: Single topic (not saved)
-    # print("\n=== Example 4: Single Topic ===")
-    # run_single_topic_generation(
-    #     topic="technology",
-    #     level=CEFRLevel.B2,
-    #     vocab_per_batch=12,
-    #     phrasal_verbs_per_batch=6,
-    #     idioms_per_batch=4
-    # )
