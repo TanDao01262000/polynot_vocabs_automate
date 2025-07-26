@@ -1,8 +1,7 @@
-# from fastapi import FastAPI
-# from .models import VocabRequest
-
-# app = FastAPI()
-
-# @app.post("/vocab/generate")
-# def generate_vocabs(request: VocabRequest):
-# 	pass
+from vocab_agent import run_single_topic_generation
+# Save a single topic to topic_lists
+run_single_topic_generation(
+    topic="technology",
+    save_topic_list=True,
+    topic_list_name="my_tech_topic"
+)

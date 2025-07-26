@@ -4,25 +4,29 @@ from typing_extensions import TypedDict
 from typing import List
 from langgraph.graph import StateGraph, START, END
 from langchain_openai import ChatOpenAI
-from database import VocabDatabase
+from supabase_database import SupabaseVocabDatabase
+from config import Config
 import os
-from dotenv import load_dotenv
-load_dotenv(override=True)
+
+# Validate configuration
+Config.validate()
+
+# Set up environment variables
 os.environ["LANGSMITH_TRACING"] = "true"
-os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGSMITH_API_KEY")
-os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGSMITH_PROJECT", "polynot")
+os.environ["LANGCHAIN_API_KEY"] = Config.LANGSMITH_API_KEY
+os.environ["LANGCHAIN_PROJECT"] = Config.LANGSMITH_PROJECT
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 
 # =========== LLM ===========
 llm = ChatOpenAI(
-    model="gpt-4o-mini",
-    temperature=0.7,
-    api_key=os.getenv("OPENAI_API_KEY")
+    model=Config.LLM_MODEL,
+    temperature=Config.LLM_TEMPERATURE,
+    api_key=Config.OPENAI_API_KEY
 )
 
 # =========== Database ===========
-db = VocabDatabase()
+db = SupabaseVocabDatabase()
 
 # =========== State ===========
 class State(TypedDict):
@@ -275,7 +279,9 @@ def run_single_topic_generation(
     vocab_per_batch: int = 10,
     phrasal_verbs_per_batch: int = 5,
     idioms_per_batch: int = 5,
-    delay_seconds: int = 3
+    delay_seconds: int = 3,
+    save_topic_list: bool = False,
+    topic_list_name: str = None
 ):
     """Run generation for a single topic (backward compatibility)"""
     return run_continuous_vocab_generation(
@@ -286,7 +292,9 @@ def run_single_topic_generation(
         vocab_per_batch=vocab_per_batch,
         phrasal_verbs_per_batch=phrasal_verbs_per_batch,
         idioms_per_batch=idioms_per_batch,
-        delay_seconds=delay_seconds
+        delay_seconds=delay_seconds,
+        save_topic_list=save_topic_list,
+        topic_list_name=topic_list_name
     )
 
 if __name__ == '__main__':
