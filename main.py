@@ -14,7 +14,7 @@ from models import CEFRLevel
 def main():
     """Main function with various examples"""
     
-    print("🚀 AI Vocabulary Generator - Examples")
+    print("AI Vocabulary Generator - Examples")
     print("=" * 50)
     
     # Example 1: Single topic generation (not saved to topic_lists)
@@ -69,8 +69,8 @@ def main():
     run_single_topic_generation(
         topic="business",
         level=CEFRLevel.C1,
-        target_language="Vietnamese",
-        original_language="English",
+        language_to_learn="Vietnamese",
+        learners_native_language="English",
         vocab_per_batch=20,
         phrasal_verbs_per_batch=8,
         idioms_per_batch=6,
@@ -81,7 +81,7 @@ def main():
 
 def quick_test():
     """Quick test function for basic functionality"""
-    print("🧪 Quick Test - Basic Functionality")
+    print("Quick Test - Basic Functionality")
     print("=" * 40)
     
     # Simple single topic test
@@ -96,7 +96,7 @@ def quick_test():
 
 def view_database():
     """View database contents"""
-    print("📊 Database Contents")
+    print("Database Contents")
     print("=" * 30)
     
     # View saved topic lists

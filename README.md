@@ -23,7 +23,7 @@ This system automatically creates vocabulary content for language learning using
 
 ### 1. Install Dependencies
 ```bash
-pip install -r requiments.txt
+pip install -r requirements.txt
 ```
 
 ### 2. Environment Configuration

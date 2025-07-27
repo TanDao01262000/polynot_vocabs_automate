@@ -21,7 +21,7 @@ os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 # =========== LLM ===========
 llm = ChatOpenAI(
     model=Config.LLM_MODEL,
-    temperature=Config.LLM_TEMPERATURE,
+    temperature=Config.TOPIC_FOCUS_TEMPERATURE,  # Use topic-focused temperature
     api_key=Config.OPENAI_API_KEY
 )
 
@@ -59,12 +59,68 @@ def get_existing_combinations_for_topic(topic: str) -> List[tuple]:
     """Get existing word combinations for a topic to avoid duplicates"""
     return db.get_existing_combinations(topic=topic)
 
+def validate_topic_relevance(entries: List[VocabEntry], topic: str) -> List[VocabEntry]:
+    """Validate that entries are relevant to the given topic"""
+    relevant_entries = []
+    topic_lower = topic.lower()
+    
+    # Keywords that indicate off-topic content (very generic words)
+    generic_words = [
+        'hello', 'goodbye', 'thank you', 'please', 'yes', 'no', 'maybe',
+        'big', 'small', 'good', 'bad', 'happy', 'sad', 'fast', 'slow',
+        'eat', 'drink', 'sleep', 'walk', 'run', 'talk', 'listen', 'see',
+        'book', 'pen', 'paper', 'table', 'chair', 'door', 'window'
+    ]
+    
+    # Topic-specific vocabulary patterns (words that are clearly related)
+    topic_patterns = {
+        'shopping': ['shop', 'buy', 'sell', 'price', 'cost', 'discount', 'sale', 'store', 'market', 'mall', 'cart', 'checkout', 'receipt', 'cash', 'card', 'money', 'bargain', 'deal', 'brand', 'size', 'fit', 'return', 'exchange', 'gift', 'purchase', 'spend', 'save', 'budget', 'expensive', 'cheap', 'affordable'],
+        'food': ['food', 'eat', 'drink', 'cook', 'recipe', 'ingredient', 'meal', 'dish', 'cuisine', 'restaurant', 'kitchen', 'taste', 'flavor', 'spice', 'seasoning', 'fresh', 'delicious', 'hungry', 'thirsty', 'breakfast', 'lunch', 'dinner', 'snack'],
+        'technology': ['tech', 'computer', 'phone', 'device', 'app', 'software', 'hardware', 'digital', 'online', 'internet', 'data', 'information', 'system', 'program', 'code', 'algorithm', 'database', 'network', 'connect', 'download', 'upload', 'install', 'update'],
+        'business': ['business', 'company', 'work', 'office', 'meeting', 'project', 'team', 'manager', 'employee', 'client', 'customer', 'service', 'product', 'market', 'industry', 'profit', 'revenue', 'cost', 'budget', 'plan', 'strategy', 'goal', 'target'],
+        'travel': ['travel', 'trip', 'journey', 'destination', 'hotel', 'flight', 'airport', 'ticket', 'booking', 'reservation', 'tourist', 'vacation', 'holiday', 'sightseeing', 'tour', 'guide', 'passport', 'visa', 'luggage', 'suitcase', 'map', 'direction']
+    }
+    
+    for entry in entries:
+        word_lower = entry.word.lower()
+        definition_lower = entry.definition.lower()
+        
+        # Check if word is too generic
+        if word_lower in generic_words:
+            print(f"Filtered out generic word: {entry.word}")
+            continue
+            
+        # Check if definition mentions the topic
+        if topic_lower in definition_lower:
+            relevant_entries.append(entry)
+            continue
+            
+        # Check if word is clearly related to topic using topic patterns
+        if topic_lower in topic_patterns:
+            topic_keywords = topic_patterns[topic_lower]
+            if any(keyword in word_lower for keyword in topic_keywords):
+                relevant_entries.append(entry)
+                continue
+        
+        # Check if word is clearly related to topic (basic heuristic)
+        topic_keywords = topic_lower.split()
+        if any(keyword in word_lower for keyword in topic_keywords):
+            relevant_entries.append(entry)
+            continue
+            
+        # If we can't determine relevance, keep it but log (but be less verbose)
+        if len(relevant_entries) < 5:  # Only show warnings for first few entries
+            print(f"Note: Checking relevance for '{entry.word}' in topic '{topic}'")
+        relevant_entries.append(entry)
+    
+    return relevant_entries
+
 def run_continuous_vocab_generation(
     topics: List[str] = None,
     category: str = None,
     level: CEFRLevel = CEFRLevel.A2,
-    target_language: str = "Vietnamese",
-    original_language: str = "English",
+    language_to_learn: str = "English",
+    learners_native_language: str = "Vietnamese",
     vocab_per_batch: int = 10,
     phrasal_verbs_per_batch: int = 5,
     idioms_per_batch: int = 5,
@@ -107,8 +163,8 @@ def run_continuous_vocab_generation(
             list_name=topic_list_name,
             category=category,
             level=level,
-            target_language=target_language,
-            original_language=original_language
+            target_language=language_to_learn,
+            original_language=learners_native_language
         )
     
     print(f"Topics to process: {len(topic_list)}")
@@ -133,7 +189,7 @@ def run_continuous_vocab_generation(
     current_topic = topic_list[0]
     
     print(f"Starting continuous vocabulary generation")
-    print(f"Level: {level.value}, Target Language: {target_language}")
+    print(f"Level: {level.value}, Target Language: {language_to_learn}")
     print("Press Ctrl+C to stop\n")
     
     try:
@@ -150,22 +206,34 @@ def run_continuous_vocab_generation(
             print(f"Found {len(existing_combinations)} existing combinations in database")
             
             # Create simplified, focused prompt
-            prompt = f'''You are an expert language teacher creating engaging vocabulary content for {current_topic}.
+            prompt = f'''You are an expert {language_to_learn} language teacher creating engaging vocabulary content for {current_topic}.
 
-Generate diverse and interesting vocabulary for CEFR level {level.value}:
+Generate diverse and interesting {language_to_learn} vocabulary for CEFR level {level.value}:
 
-1. {vocab_per_batch} vocabulary words (nouns, verbs, adjectives, adverbs)
-2. {phrasal_verbs_per_batch} phrasal verbs  
-3. {idioms_per_batch} idioms
+1. {vocab_per_batch} {language_to_learn} vocabulary words (nouns, verbs, adjectives, adverbs)
+2. {phrasal_verbs_per_batch} {language_to_learn} phrasal verbs/expressions  
+3. {idioms_per_batch} {language_to_learn} idioms/proverbs
 
-Target language: {target_language}
-Source language: {original_language}
+CRITICAL REQUIREMENTS:
+- EVERY word/phrase MUST be directly related to {current_topic}
+- NO generic vocabulary that could apply to any topic
+- Focus on specific terminology, actions, and concepts related to {current_topic}
+- Each entry should clearly connect to {current_topic} context
+
+For each entry:
+- word: The {language_to_learn} vocabulary word/phrase (what the learner wants to learn)
+- definition: {language_to_learn} definition/explanation
+- translation: {learners_native_language} translation (to help {learners_native_language} learners understand)
+- example: Example sentence in {language_to_learn} that clearly relates to {current_topic}
+- example_translation: {learners_native_language} translation of the example
 
 Focus on:
-- Practical, commonly used words for {current_topic}
-- Interesting and engaging vocabulary that learners will find useful
+- Practical, commonly used {language_to_learn} words SPECIFICALLY for {current_topic}
+- Interesting and engaging vocabulary that {learners_native_language} learners will find useful for {current_topic}
 - A good mix of difficulty levels within {level.value}
-- Cultural relevance and real-world usage
+- Cultural relevance and real-world usage in {language_to_learn} context related to {current_topic}
+
+IMPORTANT: Before generating each word, ask yourself: "Is this word directly related to {current_topic}?" If not, choose a different word.
 
 For each entry, specify the part of speech (noun, verb, adjective, adverb, phrasal_verb, idiom, phrase).'''
             
@@ -184,13 +252,18 @@ For each entry, specify the part of speech (noun, verb, adjective, adverb, phras
                 print(f"- {len(res.idioms)} idioms")
                 print(f"Total: {len(all_entries)} entries")
                 
+                # Validate topic relevance
+                print(f"\nValidating topic relevance for '{current_topic}'...")
+                relevant_entries = validate_topic_relevance(all_entries, current_topic)
+                print(f"Topic-relevant entries: {len(relevant_entries)}/{len(all_entries)}")
+                
                 # Show some examples
-                for i, entry in enumerate(all_entries[:5]):  # Show first 5
+                for i, entry in enumerate(relevant_entries[:5]):  # Show first 5
                     pos = entry.part_of_speech.value if entry.part_of_speech else "unknown"
                     print(f"  {i+1}. {entry.word} ({pos}): {entry.definition}")
                 
                 # Filter duplicates before saving (for database integrity, not AI output)
-                filtered_entries = filter_duplicates(all_entries, existing_combinations)
+                filtered_entries = filter_duplicates(relevant_entries, existing_combinations)
                 
                 if filtered_entries:
                     # Save to database
@@ -198,22 +271,22 @@ For each entry, specify the part of speech (noun, verb, adjective, adverb, phras
                     db.insert_vocab_entries(
                         entries=filtered_entries,
                         topic=current_topic,
-                        target_language=target_language,
-                        original_language=original_language
+                        target_language=language_to_learn,
+                        original_language=learners_native_language
                     )
-                    print("✓ Saved successfully!")
+                    print("Saved successfully!")
                 else:
-                    print("\n⚠️  No new entries to save (all were duplicates)")
+                    print("\nNo new entries to save (all were duplicates)")
                 
                 # Show current database stats
                 saved_entries = db.get_vocab_entries(topic=current_topic)
-                print(f"📊 Total entries in database for '{current_topic}': {len(saved_entries)}")
+                print(f"Total entries in database for '{current_topic}': {len(saved_entries)}")
                 
-                # Move to next topic
+                # Move to next topicl
                 topic_index += 1
                 
             except Exception as e:
-                print(f"❌ Error in batch #{batch_count}: {e}")
+                print(f"Error in batch #{batch_count}: {e}")
                 print("Continuing to next topic...")
                 topic_index += 1
             
@@ -232,7 +305,7 @@ For each entry, specify the part of speech (noun, verb, adjective, adverb, phras
             saved_entries = db.get_vocab_entries(topic=topic)
             total_entries += len(saved_entries)
         
-        print(f"\n📈 FINAL SUMMARY:")
+        print(f"\nFINAL SUMMARY:")
         print(f"Topics processed: {topic_index}/{len(topic_list)}")
         print(f"Level: {level.value}")
         print(f"Total batches run: {batch_count}")
@@ -261,8 +334,8 @@ def view_saved_topic_lists():
 def run_single_topic_generation(
     topic: str,
     level: CEFRLevel = CEFRLevel.A2,
-    target_language: str = "Vietnamese",
-    original_language: str = "English",
+    language_to_learn: str = "English",
+    learners_native_language: str = "Vietnamese",
     vocab_per_batch: int = 10,
     phrasal_verbs_per_batch: int = 5,
     idioms_per_batch: int = 5,
@@ -274,8 +347,8 @@ def run_single_topic_generation(
     return run_continuous_vocab_generation(
         topics=[topic],
         level=level,
-        target_language=target_language,
-        original_language=original_language,
+        language_to_learn=language_to_learn,
+        learners_native_language=learners_native_language,
         vocab_per_batch=vocab_per_batch,
         phrasal_verbs_per_batch=phrasal_verbs_per_batch,
         idioms_per_batch=idioms_per_batch,
