@@ -23,7 +23,8 @@ class VocabRequest(BaseModel):
     """
     Request body for generating vocabularies.
     """
-    topic: str
+    topic_name: str
+    category_name: Optional[str] = None
     target_language: str  
     level: CEFRLevel      
 

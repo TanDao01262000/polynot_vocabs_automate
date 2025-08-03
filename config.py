@@ -19,16 +19,19 @@ class Config:
     
     # LLM Configuration
     LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+    LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))  # Lower temperature for more focused generation
+    
+    # Topic Focus Configuration
+    TOPIC_FOCUS_TEMPERATURE = float(os.getenv("TOPIC_FOCUS_TEMPERATURE", "0.2"))  # Even lower for topic-specific generation
     
     # Default Language Settings
-    DEFAULT_TARGET_LANGUAGE = os.getenv("DEFAULT_TARGET_LANGUAGE", "Vietnamese")
-    DEFAULT_ORIGINAL_LANGUAGE = os.getenv("DEFAULT_ORIGINAL_LANGUAGE", "English")
+    LANGUAGE_TO_LEARN = os.getenv("LANGUAGE_TO_LEARN", "English")  # What learners want to learn
+    LEARNERS_NATIVE_LANGUAGE = os.getenv("LEARNERS_NATIVE_LANGUAGE", "Vietnamese")  # Learner's native language
     
     # Generation Settings
-    DEFAULT_VOCAB_PER_BATCH = int(os.getenv("DEFAULT_VOCAB_PER_BATCH", "10"))
-    DEFAULT_PHRASAL_VERBS_PER_BATCH = int(os.getenv("DEFAULT_PHRASAL_VERBS_PER_BATCH", "5"))
-    DEFAULT_IDIOMS_PER_BATCH = int(os.getenv("DEFAULT_IDIOMS_PER_BATCH", "5"))
+    DEFAULT_VOCAB_PER_BATCH = int(os.getenv("DEFAULT_VOCAB_PER_BATCH", "20"))  # Reduced from 50
+    DEFAULT_PHRASAL_VERBS_PER_BATCH = int(os.getenv("DEFAULT_PHRASAL_VERBS_PER_BATCH", "10"))  # Reduced from 25
+    DEFAULT_IDIOMS_PER_BATCH = int(os.getenv("DEFAULT_IDIOMS_PER_BATCH", "5"))  # Reduced from 25
     DEFAULT_DELAY_SECONDS = int(os.getenv("DEFAULT_DELAY_SECONDS", "3"))
     
     @classmethod
@@ -56,8 +59,8 @@ class Config:
         print("=== Configuration ===")
         print(f"LLM Model: {cls.LLM_MODEL}")
         print(f"LLM Temperature: {cls.LLM_TEMPERATURE}")
-        print(f"Target Language: {cls.DEFAULT_TARGET_LANGUAGE}")
-        print(f"Original Language: {cls.DEFAULT_ORIGINAL_LANGUAGE}")
+        print(f"Target Language: {cls.LANGUAGE_TO_LEARN}")
+        print(f"Original Language: {cls.LEARNERS_NATIVE_LANGUAGE}")
         print(f"Vocab per batch: {cls.DEFAULT_VOCAB_PER_BATCH}")
         print(f"Phrasal verbs per batch: {cls.DEFAULT_PHRASAL_VERBS_PER_BATCH}")
         print(f"Idioms per batch: {cls.DEFAULT_IDIOMS_PER_BATCH}")
