@@ -19,11 +19,75 @@ class SupabaseVocabDatabase:
         
         self.client: Client = create_client(self.supabase_url, self.supabase_key)
     
-    def insert_vocab_entries(self, entries: List[VocabEntry], topic: str = None, 
-                           target_language: str = None, original_language: str = None):
+    def get_topic_id(self, topic_name: str, category_name: str = None) -> Optional[str]:
+        """Get topic ID by name and optionally category"""
+        query = self.client.table("topics").select("id")
+        
+        if category_name:
+            # Get category ID first
+            category_result = self.client.table("categories").select("id").eq("name", category_name).execute()
+            if not category_result.data:
+                return None
+            category_id = category_result.data[0]["id"]
+            query = query.eq("name", topic_name).eq("category_id", category_id)
+        else:
+            query = query.eq("name", topic_name)
+        
+        result = query.execute()
+        return result.data[0]["id"] if result.data else None
+    
+    def get_topic_name(self, topic_id: str) -> Optional[str]:
+        """Get topic name by ID"""
+        result = self.client.table("topics").select("name").eq("id", topic_id).execute()
+        return result.data[0]["name"] if result.data else None
+    
+    def get_category_id(self, category_name: str) -> Optional[str]:
+        """Get category ID by name"""
+        # Since we don't have a categories table, return None
+        return None
+    
+    def create_topic_if_not_exists(self, topic_name: str, category_name: str = None) -> str:
+        """Create a topic if it doesn't exist and return the topic ID"""
+        # Check if topic already exists
+        existing_topic_id = self.get_topic_id(topic_name, category_name)
+        if existing_topic_id:
+            return existing_topic_id
+        
+        # Create new topic
+        topic_data = {
+            "name": topic_name,
+            "category_name": category_name,
+            "created_at": datetime.now().isoformat()
+        }
+        
+        try:
+            result = self.client.table("topics").insert(topic_data).execute()
+            if result.data:
+                new_topic_id = result.data[0]["id"]
+                print(f"Created new topic: '{topic_name}' with ID: {new_topic_id}")
+                return new_topic_id
+            else:
+                raise ValueError(f"Failed to create topic '{topic_name}'")
+        except Exception as e:
+            print(f"Error creating topic '{topic_name}': {e}")
+            raise
+
+    def insert_vocab_entries(self, entries: List[VocabEntry], topic_name: str = None, 
+                           category_name: str = None, target_language: str = None, 
+                           original_language: str = None):
         """Insert multiple vocab entries into Supabase, skipping duplicates"""
         inserted_count = 0
         skipped_count = 0
+        
+        # Get or create topic ID if topic name is provided
+        topic_id = None
+        if topic_name:
+            try:
+                topic_id = self.create_topic_if_not_exists(topic_name, category_name)
+            except Exception as e:
+                print(f"Error with topic '{topic_name}': {e}")
+                # Continue without topic_id if topic creation fails
+                topic_id = None
         
         for entry in entries:
             try:
@@ -36,7 +100,7 @@ class SupabaseVocabDatabase:
                     "example_translation": entry.example_translation,
                     "level": entry.level.value,
                     "part_of_speech": entry.part_of_speech.value if entry.part_of_speech else None,
-                    "topic": topic,
+                    "topic_id": topic_id,
                     "target_language": target_language,
                     "original_language": original_language
                 }
@@ -53,19 +117,22 @@ class SupabaseVocabDatabase:
                 # Check if it's a unique constraint violation
                 if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
                     skipped_count += 1
-                    print(f"Skipped duplicate: {entry.word} (topic: {topic}, level: {entry.level.value})")
+                    print(f"Skipped duplicate: {entry.word} (topic: {topic_name}, level: {entry.level.value})")
                 else:
                     print(f"Error inserting {entry.word}: {e}")
                     raise
         
         print(f"Inserted {inserted_count} new vocab entries, skipped {skipped_count} duplicates")
     
-    def get_vocab_entries(self, topic: str = None, level: CEFRLevel = None, limit: int = 100) -> List[Dict[str, Any]]:
+    def get_vocab_entries(self, topic_name: str = None, category_name: str = None, 
+                         level: CEFRLevel = None, limit: int = 100) -> List[Dict[str, Any]]:
         """Retrieve vocab entries from Supabase with optional filters"""
         query = self.client.table("vocab_entries").select("*")
         
-        if topic:
-            query = query.eq("topic", topic)
+        if topic_name:
+            topic_id = self.get_topic_id(topic_name, category_name)
+            if topic_id:
+                query = query.eq("topic_id", topic_id)
         
         if level:
             query = query.eq("level", level.value)
@@ -75,12 +142,14 @@ class SupabaseVocabDatabase:
         result = query.execute()
         return result.data if result.data else []
     
-    def get_existing_combinations(self, topic: str = None) -> List[tuple]:
+    def get_existing_combinations(self, topic_name: str = None, category_name: str = None) -> List[tuple]:
         """Get existing word combinations for a topic to avoid duplicates"""
         query = self.client.table("vocab_entries").select("word, level, part_of_speech")
         
-        if topic:
-            query = query.eq("topic", topic)
+        if topic_name:
+            topic_id = self.get_topic_id(topic_name, category_name)
+            if topic_id:
+                query = query.eq("topic_id", topic_id)
         
         result = query.execute()
         
@@ -141,20 +210,24 @@ class SupabaseVocabDatabase:
         
         return topic_lists
     
-    def get_vocab_stats(self, topic: str = None) -> Dict[str, Any]:
+    def get_vocab_stats(self, topic_name: str = None, category_name: str = None) -> Dict[str, Any]:
         """Get statistics about vocab entries"""
         query = self.client.table("vocab_entries").select("*", count="exact")
         
-        if topic:
-            query = query.eq("topic", topic)
+        if topic_name:
+            topic_id = self.get_topic_id(topic_name, category_name)
+            if topic_id:
+                query = query.eq("topic_id", topic_id)
         
         result = query.execute()
         total_count = result.count if hasattr(result, 'count') else len(result.data or [])
         
         # Get level distribution
         level_query = self.client.table("vocab_entries").select("level")
-        if topic:
-            level_query = level_query.eq("topic", topic)
+        if topic_name:
+            topic_id = self.get_topic_id(topic_name, category_name)
+            if topic_id:
+                level_query = level_query.eq("topic_id", topic_id)
         
         level_result = level_query.execute()
         level_distribution = {}
@@ -166,15 +239,17 @@ class SupabaseVocabDatabase:
         return {
             "total_entries": total_count,
             "level_distribution": level_distribution,
-            "topic": topic
+            "topic": topic_name
         }
     
-    def delete_vocab_entries(self, topic: str = None, level: CEFRLevel = None):
+    def delete_vocab_entries(self, topic_name: str = None, category_name: str = None, level: CEFRLevel = None):
         """Delete vocab entries with optional filters"""
         query = self.client.table("vocab_entries").delete()
         
-        if topic:
-            query = query.eq("topic", topic)
+        if topic_name:
+            topic_id = self.get_topic_id(topic_name, category_name)
+            if topic_id:
+                query = query.eq("topic_id", topic_id)
         
         if level:
             query = query.eq("level", level.value)
@@ -183,17 +258,36 @@ class SupabaseVocabDatabase:
         print(f"Deleted vocab entries: {len(result.data) if result.data else 0}")
         return result.data
     
-    def search_vocab_entries(self, search_term: str, topic: str = None, limit: int = 50) -> List[Dict[str, Any]]:
+    def search_vocab_entries(self, search_term: str, topic_name: str = None, 
+                           category_name: str = None, limit: int = 50) -> List[Dict[str, Any]]:
         """Search vocab entries by word or definition"""
         query = self.client.table("vocab_entries").select("*")
         
         # Use text search (PostgreSQL full-text search)
         query = query.text_search("word", search_term)
         
-        if topic:
-            query = query.eq("topic", topic)
+        if topic_name:
+            topic_id = self.get_topic_id(topic_name, category_name)
+            if topic_id:
+                query = query.eq("topic_id", topic_id)
         
         query = query.limit(limit).order("created_at", desc=True)
         
         result = query.execute()
-        return result.data if result.data else [] 
+        return result.data if result.data else []
+    
+    def get_all_topics(self) -> List[Dict[str, Any]]:
+        """Get all topics with their category information"""
+        result = self.client.table("topics").select("*").execute()
+        return result.data if result.data else []
+    
+    def get_topics_by_category(self, category_name: str) -> List[Dict[str, Any]]:
+        """Get topics for a specific category"""
+        # Since we don't have a categories table, we'll return empty for now
+        # This can be enhanced later if needed
+        return []
+    
+    def get_all_categories(self) -> List[Dict[str, Any]]:
+        """Get all categories"""
+        # Since we don't have a categories table, return empty list
+        return [] 
