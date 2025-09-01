@@ -1,4 +1,4 @@
-from models import VocabEntry, CEFRLevel, VocabListResponse, PartOfSpeech
+from models import VocabEntry, CEFRLevel, VocabGenerationResponse, PartOfSpeech
 from topics import get_topic_list, get_categories, get_topics_by_category
 from typing_extensions import TypedDict
 from typing import List
@@ -38,7 +38,7 @@ class State(TypedDict):
 	vocab_entries: list[VocabEntry]
 
 
-structured_llm = llm.with_structured_output(VocabListResponse)
+structured_llm = llm.with_structured_output(VocabGenerationResponse)
 
 # =========== Nodes - functions ===========
 

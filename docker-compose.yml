@@ -1,0 +1,19 @@
+services:
+  vocab-api:
+    build: .
+    ports:
+      - "8001:8001"
+    volumes:
+      # Mount your local code directory to the container
+      - .:/app
+      # Exclude unnecessary files from mounting
+      - /app/__pycache__
+      - /app/.git
+    environment:
+      - PYTHONPATH=/app
+      - ENVIRONMENT=development
+    command: uvicorn vocab_api:app --host 0.0.0.0 --port 8001 --reload --reload-dir /app
+    restart: unless-stopped
+    # Enable hot reload
+    stdin_open: true
+    tty: true

@@ -11,5 +11,5 @@ COPY . .
 
 EXPOSE 8001
 
-# Start FastAPI app on 8001
-CMD ["uvicorn", "vocab_api:app", "--host", "0.0.0.0", "--port", "8001"]
+# Start FastAPI app with auto-reload for development
+CMD ["uvicorn", "vocab_api:app", "--host", "0.0.0.0", "--port", "8001", "--reload", "--reload-dir", "/app"]
