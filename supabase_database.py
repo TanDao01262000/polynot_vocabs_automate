@@ -20,20 +20,8 @@ class SupabaseVocabDatabase:
         self.client: Client = create_client(self.supabase_url, self.supabase_key)
     
     def get_topic_id(self, topic_name: str, category_name: str = None) -> Optional[str]:
-        """Get topic ID by name and optionally category"""
-        query = self.client.table("topics").select("id")
-        
-        if category_name:
-            # Get category ID first
-            category_result = self.client.table("categories").select("id").eq("name", category_name).execute()
-            if not category_result.data:
-                return None
-            category_id = category_result.data[0]["id"]
-            query = query.eq("name", topic_name).eq("category_id", category_id)
-        else:
-            query = query.eq("name", topic_name)
-        
-        result = query.execute()
+        """Get topic ID by name (category not used)."""
+        result = self.client.table("topics").select("id").eq("name", topic_name).execute()
         return result.data[0]["id"] if result.data else None
     
     def get_topic_name(self, topic_id: str) -> Optional[str]:
@@ -93,15 +81,15 @@ class SupabaseVocabDatabase:
         inserted_count = 0
         skipped_count = 0
         
-        # Get or create topic ID if topic name is provided
-        topic_id = None
-        if topic_name:
-            try:
-                topic_id = self.create_topic_if_not_exists(topic_name, category_name)
-            except Exception as e:
-                print(f"Error with topic '{topic_name}': {e}")
-                # Continue without topic_id if topic creation fails
-                topic_id = None
+        # Enforce that every vocab must be linked to a topic
+        if not topic_name:
+            raise ValueError("topic_name is required to insert vocab entries and must not be None")
+        
+        # Get or create topic ID
+        topic_id = self.create_topic_if_not_exists(topic_name, category_name)
+        if not topic_id:
+            # Defensive: create_topic_if_not_exists should return an ID or raise
+            raise RuntimeError(f"Failed to resolve topic_id for topic '{topic_name}'")
         
         for entry in entries:
             try:
