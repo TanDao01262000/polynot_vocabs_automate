@@ -5,10 +5,17 @@ from typing import List, Optional
 import uvicorn
 from datetime import datetime, timedelta
 import uuid
+import hashlib
+import secrets
 
 # Import your existing modules
 from vocab_agent import run_single_topic_generation, run_continuous_vocab_generation, view_saved_topic_lists
-from models import CEFRLevel, VocabListViewRequest, VocabListViewResponse, VocabEntryActionRequest, VocabListRequest, VocabListResponse
+from models import (
+    CEFRLevel, VocabListViewRequest, VocabListViewResponse, VocabEntryActionRequest, 
+    VocabListRequest, VocabListResponse, FlashcardSessionRequest, FlashcardAnswerRequest,
+    FlashcardSessionResponse, StudyMode, DifficultyRating, FlashcardCard, FlashcardStats,
+    SessionType, SpacedRepetitionSettings, StudyReminder, FlashcardAchievement
+)
 from config import Config
 from topics import get_categories, get_topics_by_category, get_topic_list
 from supabase_database import SupabaseVocabDatabase
@@ -34,29 +41,152 @@ app.add_middleware(
 # Initialize database
 db = SupabaseVocabDatabase()
 
+# In-memory session storage (in production, use Redis or database)
+active_sessions = {}
+
 # =========== AUTHENTICATION HELPER ===========
 
-async def get_current_user(authorization: Optional[str] = Header(None)) -> str:
-    """Extract user ID from authorization header"""
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/auth/login", tags=["Authentication"])
+async def login(request: LoginRequest):
+    """Secure login endpoint with session management"""
+    
+    # SECURITY: Only accept specific credentials
+    if request.username == "Tan" and request.password == "Khanh123:)":
+        # Use the actual user ID from the database
+        user_id = "206a458c-c01a-4f20-aec3-08107df8c515"
+        
+        print(f"Using user ID: {user_id}")
+        
+        # Create user profile if it doesn't exist
+        await ensure_user_exists(user_id, request.username)
+        
+        # SECURITY FIX: Create a secure session token
+        session_token = secrets.token_urlsafe(32)
+        session_expiry = datetime.now() + timedelta(hours=24)  # 24 hour expiry
+        
+        # Store session in memory (in production, use Redis or database)
+        active_sessions[session_token] = {
+            "user_id": user_id,
+            "username": request.username,
+            "created_at": datetime.now(),
+            "expires_at": session_expiry
+        }
+        
+        return {
+            "success": True,
+            "message": "Login successful",
+            "user_id": user_id,
+            "username": request.username,
+            "session_token": session_token,
+            "expires_at": session_expiry.isoformat()
+        }
+    else:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+@app.post("/auth/logout", tags=["Authentication"])
+async def logout(authorization: Optional[str] = Header(None)):
+    """Logout and invalidate session"""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header required")
     
-    # For now, we'll use a simple user ID extraction
-    # In production, you should validate JWT tokens with Supabase
     try:
-        # Assuming format: "Bearer user_id" or just "user_id"
+        # Extract token
         if authorization.startswith("Bearer "):
-            user_id = authorization[7:]  # Remove "Bearer " prefix
+            token = authorization[7:]
         else:
-            user_id = authorization
+            token = authorization
         
-        # Validate that it's a valid UUID format
+        # Remove session if it exists
+        if token in active_sessions:
+            del active_sessions[token]
+            return {
+                "success": True,
+                "message": "Logged out successfully"
+            }
+        else:
+            return {
+                "success": True,
+                "message": "Session not found (already logged out)"
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Logout failed: {str(e)}")
+
+async def get_current_user(authorization: Optional[str] = Header(None)) -> str:
+    """Extract and validate user from session token or user ID (backward compatibility)"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    
+    try:
+        # Check if it's a session token (new secure method)
+        if authorization.startswith("Bearer "):
+            token = authorization[7:]  # Remove "Bearer " prefix
+        else:
+            token = authorization
+        
+        # First, try to validate as session token
+        if token in active_sessions:
+            session = active_sessions[token]
+            # Check if session is expired
+            if datetime.now() > session["expires_at"]:
+                # Remove expired session
+                del active_sessions[token]
+                raise HTTPException(status_code=401, detail="Session expired")
+            
+            # Session is valid, return user ID
+            return session["user_id"]
+        
+        # Backward compatibility: Check if it's a valid UUID (old method)
         import uuid
-        uuid.UUID(user_id)
+        try:
+            uuid.UUID(token)
+            # This is a user ID, check if user exists
+            result = db.client.table("profiles").select("id").eq("id", token).execute()
+            if not result.data:
+                raise HTTPException(status_code=401, detail="User not found or not authenticated")
+            return token
+        except ValueError:
+            # Not a valid UUID, must be an invalid token
+            raise HTTPException(status_code=401, detail="Invalid session token or user ID")
         
-        return user_id
+    except HTTPException:
+        raise
     except Exception:
-        raise HTTPException(status_code=401, detail="Invalid user ID format")
+        raise HTTPException(status_code=401, detail="Authentication verification failed")
+
+async def ensure_user_exists(user_id: str, username: str = None) -> bool:
+    """Ensure user exists in the profiles table, create if necessary"""
+    try:
+        # Check if user exists
+        result = db.client.table("profiles").select("id").eq("id", user_id).execute()
+        
+        if not result.data:
+            # User doesn't exist, create them
+            user_data = {
+                "id": user_id,
+                "email": f"{username or 'user'}@example.com" if username else f"user-{user_id}@example.com",
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat()
+            }
+            
+            # Add username if provided
+            if username:
+                user_data["username"] = username
+            
+            db.client.table("profiles").insert(user_data).execute()
+            print(f"Created user profile for {user_id}")
+            return True
+        else:
+            print(f"User {user_id} already exists in profiles")
+            return True
+            
+    except Exception as e:
+        print(f"Error ensuring user exists: {e}")
+        # Don't raise exception, just log the error
+        return False
 
 # =========== Pydantic Models ===========
 
@@ -235,17 +365,8 @@ async def toggle_favorite(
 ):
     """Toggle favorite status for a vocabulary entry"""
     try:
-        # Ensure user exists in profiles table for testing
-        try:
-            db.client.table("profiles").select("id").eq("id", current_user).execute()
-        except:
-            # Create minimal user record for testing
-            db.client.table("profiles").insert({
-                "id": current_user,
-                "email": f"test-{current_user}@example.com",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }).execute()
+        # Ensure user exists in profiles table
+        await ensure_user_exists(current_user)
         
         is_favorite = db.toggle_favorite(current_user, request.vocab_entry_id)
         
@@ -264,17 +385,8 @@ async def hide_vocab_entry(
 ):
     """Hide or unhide a vocabulary entry based on action"""
     try:
-        # Ensure user exists in profiles table for testing
-        try:
-            db.client.table("profiles").select("id").eq("id", current_user).execute()
-        except:
-            # Create minimal user record for testing
-            db.client.table("profiles").insert({
-                "id": current_user,
-                "email": f"test-{current_user}@example.com",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }).execute()
+        # Ensure user exists in profiles table
+        await ensure_user_exists(current_user)
         
         # Check if this is a hide or unhide action
         if request.action == "unhide":
@@ -329,17 +441,8 @@ async def hide_toggle_vocab_entry(
 ):
     """Toggle hide/unhide status for a vocabulary entry"""
     try:
-        # Ensure user exists in profiles table for testing
-        try:
-            db.client.table("profiles").select("id").eq("id", current_user).execute()
-        except:
-            # Create minimal user record for testing
-            db.client.table("profiles").insert({
-                "id": current_user,
-                "email": f"test-{current_user}@example.com",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }).execute()
+        # Ensure user exists in profiles table
+        await ensure_user_exists(current_user)
         
         vocab_entry_id = request.get("vocab_entry_id")
         action = request.get("action", "hide")  # Default to hide
@@ -380,17 +483,8 @@ async def add_personal_note(
         if not request.value:
             raise HTTPException(status_code=400, detail="Note content is required")
         
-        # Ensure user exists in profiles table for testing
-        try:
-            db.client.table("profiles").select("id").eq("id", current_user).execute()
-        except:
-            # Create minimal user record for testing
-            db.client.table("profiles").insert({
-                "id": current_user,
-                "email": f"test-{current_user}@example.com",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }).execute()
+        # Ensure user exists in profiles table
+        await ensure_user_exists(current_user)
         
         db.add_personal_note(current_user, request.vocab_entry_id, request.value)
         
@@ -418,17 +512,8 @@ async def rate_difficulty(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         
-        # Ensure user exists in profiles table for testing
-        try:
-            db.client.table("profiles").select("id").eq("id", current_user).execute()
-        except:
-            # Create minimal user record for testing
-            db.client.table("profiles").insert({
-                "id": current_user,
-                "email": f"test-{current_user}@example.com",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }).execute()
+        # Ensure user exists in profiles table
+        await ensure_user_exists(current_user)
         
         db.rate_difficulty(current_user, request.vocab_entry_id, rating)
         
@@ -446,17 +531,8 @@ async def mark_as_reviewed(
 ):
     """Mark or unmark a vocabulary entry as reviewed based on action"""
     try:
-        # Ensure user exists in profiles table for testing
-        try:
-            db.client.table("profiles").select("id").eq("id", current_user).execute()
-        except:
-            # Create minimal user record for testing
-            db.client.table("profiles").insert({
-                "id": current_user,
-                "email": f"test-{current_user}@example.com",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }).execute()
+        # Ensure user exists in profiles table
+        await ensure_user_exists(current_user)
         
         # Check if this is a review or unreview action
         if request.action == "unreview":
@@ -491,17 +567,8 @@ async def create_vocab_list(
 ):
     """Create a new vocabulary list"""
     try:
-        # Ensure user exists in profiles table for testing
-        try:
-            db.client.table("profiles").select("id").eq("id", current_user).execute()
-        except:
-            # Create minimal user record for testing
-            db.client.table("profiles").insert({
-                "id": current_user,
-                "email": f"test-{current_user}@example.com",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }).execute()
+        # Ensure user exists in profiles table
+        await ensure_user_exists(current_user)
         
         list_id = db.create_user_vocab_list(
             user_id=current_user,
@@ -1146,6 +1213,54 @@ async def save_vocab_entry(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save vocabulary: {str(e)}")
 
+@app.post("/vocab/save-by-id", tags=["User Vocabulary"])
+async def save_vocab_by_id(
+    request: dict,
+    current_user: str = Depends(get_current_user)
+):
+    """Save an existing vocabulary entry to user's personal vocabulary by ID"""
+    try:
+        vocab_entry_id = request["vocab_entry_id"]
+        
+        # Get the vocabulary entry from the database
+        result = db.client.table("vocab_entries").select("*").eq("id", vocab_entry_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Vocabulary entry not found")
+        
+        vocab_data = result.data[0]
+        
+        # Create VocabEntry object
+        from models import VocabEntry, CEFRLevel, PartOfSpeech
+        
+        vocab_entry = VocabEntry(
+            word=vocab_data["word"],
+            definition=vocab_data["definition"],
+            translation=vocab_data["translation"],
+            example=vocab_data["example"],
+            example_translation=vocab_data["example_translation"],
+            level=CEFRLevel(vocab_data["level"]),
+            part_of_speech=PartOfSpeech(vocab_data["part_of_speech"]) if vocab_data["part_of_speech"] else None
+        )
+        
+        # Save to user's vocabulary
+        saved_id = db.save_vocab_to_user(
+            user_id=current_user,
+            vocab_entry=vocab_entry,
+            topic_name=vocab_data.get("topic_name"),
+            category_name=vocab_data.get("category_name"),
+            target_language=vocab_data.get("target_language", "English"),
+            original_language=vocab_data.get("original_language", "Vietnamese")
+        )
+        
+        return {
+            "success": True,
+            "message": f"Vocabulary '{vocab_data['word']}' saved to your personal vocabulary",
+            "vocab_entry_id": saved_id
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save vocabulary: {str(e)}")
+
 @app.post("/vocab/test-save", tags=["Testing"])
 async def test_save_vocab(current_user: str = Depends(get_current_user)):
     """Test endpoint to save a sample vocabulary entry"""
@@ -1264,17 +1379,8 @@ async def review_toggle_vocab_entry(
 ):
     """Toggle review status for a vocabulary entry"""
     try:
-        # Ensure user exists in profiles table for testing
-        try:
-            db.client.table("profiles").select("id").eq("id", current_user).execute()
-        except:
-            # Create minimal user record for testing
-            db.client.table("profiles").insert({
-                "id": current_user,
-                "email": f"test-{current_user}@example.com",
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }).execute()
+        # Ensure user exists in profiles table
+        await ensure_user_exists(current_user)
         
         vocab_entry_id = request.get("vocab_entry_id")
         action = request.get("action", "review")  # Default to review
@@ -1316,6 +1422,570 @@ async def review_toggle_vocab_entry(
             }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to toggle review status: {str(e)}")
+
+# =========== ADVANCED FLASHCARD SYSTEM ENDPOINTS ===========
+
+@app.post("/flashcard/session/create", response_model=FlashcardSessionResponse, tags=["Flashcards"])
+async def create_flashcard_session(
+    request: FlashcardSessionRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Create a new advanced flashcard study session"""
+    try:
+        # Ensure user exists in profiles table
+        await ensure_user_exists(current_user)
+        
+        session_id = db.create_flashcard_session(current_user, request)
+        
+        # Get the created session
+        session_data = db.get_flashcard_session(session_id)
+        
+        # Get the first card
+        current_card = db.get_current_flashcard(session_id)
+        
+        return FlashcardSessionResponse(
+            success=True,
+            message=f"Advanced flashcard session '{request.session_name}' created successfully",
+            session=session_data,
+            current_card=current_card,
+            progress={
+                "current_card": 0,
+                "total_cards": session_data["total_cards"] if session_data else 0,
+                "correct_answers": 0,
+                "incorrect_answers": 0,
+                "skipped_cards": 0
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create flashcard session: {str(e)}")
+
+@app.post("/test/flashcard/session/create", tags=["Testing"])
+async def create_test_flashcard_session(
+    request: FlashcardSessionRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Create a test flashcard session that works with existing vocabulary entries"""
+    try:
+        # Use the current authenticated user instead of hardcoded test user
+        await ensure_user_exists(current_user)
+        
+        session_id = db.create_test_flashcard_session(current_user, request)
+        
+        # Get the created session
+        session_data = db.get_flashcard_session(session_id)
+        
+        # Get the first card
+        current_card = db.get_current_flashcard(session_id)
+        
+        return {
+            "success": True,
+            "message": f"Test flashcard session '{request.session_name}' created successfully",
+            "session_id": session_id,
+            "session": session_data,
+            "current_card": current_card,
+            "progress": {
+                "current_card": 0,
+                "total_cards": session_data["total_cards"] if session_data else 0,
+                "correct_answers": 0,
+                "incorrect_answers": 0,
+                "skipped_cards": 0
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create test flashcard session: {str(e)}")
+
+@app.get("/test/flashcard/answer", tags=["Testing"])
+async def test_flashcard_answer_validation(
+    user_answer: str,
+    correct_answer: str,
+    study_mode: str = "practice"
+):
+    """Test the flashcard answer validation logic without database"""
+    try:
+        # Test the validation logic directly
+        is_correct = db._validate_answer(user_answer, correct_answer, study_mode)
+        
+        return {
+            "success": True,
+            "user_answer": user_answer,
+            "correct_answer": correct_answer,
+            "study_mode": study_mode,
+            "is_correct": is_correct,
+            "message": "Answer validation test completed"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to test answer validation: {str(e)}")
+
+@app.get("/flashcard/session/{session_id}/current", tags=["Flashcards"])
+async def get_current_flashcard_endpoint(
+    session_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Get the current flashcard for a session"""
+    try:
+        # Verify session belongs to user
+        session = db.get_flashcard_session(session_id)
+        if not session or session["user_id"] != current_user:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        current_card = db.get_current_flashcard(session_id)
+        
+        if not current_card:
+            return {
+                "success": True,
+                "message": "Session completed",
+                "session_complete": True,
+                "progress": {
+                    "current_card": session["current_card_index"],
+                    "total_cards": session["total_cards"],
+                    "correct_answers": session["correct_answers"],
+                    "incorrect_answers": session["incorrect_answers"],
+                    "skipped_cards": session["skipped_cards"]
+                }
+            }
+        
+        return {
+            "success": True,
+            "message": "Current flashcard retrieved",
+            "current_card": current_card,
+            "session_complete": False
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get current flashcard: {str(e)}")
+
+@app.post("/flashcard/session/{session_id}/answer", tags=["Flashcards"])
+async def submit_flashcard_answer(
+    session_id: str,
+    request: FlashcardAnswerRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Submit an answer for a flashcard with advanced processing"""
+    try:
+        # Verify session belongs to user
+        session = db.get_flashcard_session(session_id)
+        if not session or session["user_id"] != current_user:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # If vocab_entry_id is not provided, get it from the current card
+        if not request.vocab_entry_id:
+            current_card = db.get_current_flashcard(session_id)
+            if not current_card:
+                raise HTTPException(status_code=400, detail="No current card available")
+            request.vocab_entry_id = current_card["vocab_entry_id"]
+        
+        result = db.submit_flashcard_answer_advanced(session_id, request)
+        
+        return {
+            "success": True,
+            "message": "Answer submitted successfully",
+            "result": result
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to submit answer: {str(e)}")
+
+@app.get("/flashcard/analytics", tags=["Flashcards"])
+async def get_flashcard_analytics(
+    days: int = 30,
+    current_user: str = Depends(get_current_user)
+):
+    """Get comprehensive flashcard analytics"""
+    try:
+        analytics = db.get_flashcard_analytics(current_user, days)
+        
+        return {
+            "success": True,
+            "message": f"Analytics for last {days} days",
+            "analytics": analytics
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get analytics: {str(e)}")
+
+@app.get("/flashcard/study-modes", tags=["Flashcards"])
+async def get_study_modes():
+    """Get available study modes with descriptions"""
+    return {
+        "success": True,
+        "message": "Available study modes",
+        "study_modes": [
+            {
+                "value": StudyMode.REVIEW.value,
+                "name": "Review Mode",
+                "description": "Show definition, guess the word",
+                "icon": "🔍"
+            },
+            {
+                "value": StudyMode.PRACTICE.value,
+                "name": "Practice Mode", 
+                "description": "Show word, guess the definition",
+                "icon": "💭"
+            },
+            {
+                "value": StudyMode.TEST.value,
+                "name": "Test Mode",
+                "description": "Multiple choice questions",
+                "icon": "📝"
+            },
+            {
+                "value": StudyMode.WRITE.value,
+                "name": "Write Mode",
+                "description": "Type the answer",
+                "icon": "✍️"
+            },
+            {
+                "value": StudyMode.LISTEN.value,
+                "name": "Listen Mode",
+                "description": "Audio pronunciation practice",
+                "icon": "🎧"
+            },
+            {
+                "value": StudyMode.SPELLING.value,
+                "name": "Spelling Mode",
+                "description": "Spell the word correctly",
+                "icon": "🔤"
+            },
+            {
+                "value": StudyMode.SYNONYMS.value,
+                "name": "Synonyms Mode",
+                "description": "Find synonyms for the word",
+                "icon": "🔄"
+            },
+            {
+                "value": StudyMode.ANTONYMS.value,
+                "name": "Antonyms Mode",
+                "description": "Find antonyms for the word",
+                "icon": "↔️"
+            },
+            {
+                "value": StudyMode.CONTEXT.value,
+                "name": "Context Mode",
+                "description": "Fill in the blank in context",
+                "icon": "📖"
+            },
+            {
+                "value": StudyMode.MIXED.value,
+                "name": "Mixed Mode",
+                "description": "Random combination of all modes",
+                "icon": "🎲"
+            }
+        ]
+    }
+
+@app.get("/flashcard/session-types", tags=["Flashcards"])
+async def get_session_types():
+    """Get available session types"""
+    return {
+        "success": True,
+        "message": "Available session types",
+        "session_types": [
+            {
+                "value": SessionType.DAILY_REVIEW.value,
+                "name": "Daily Review",
+                "description": "Review overdue and new cards",
+                "icon": "📅"
+            },
+            {
+                "value": SessionType.TOPIC_FOCUS.value,
+                "name": "Topic Focus",
+                "description": "Focus on specific topic vocabulary",
+                "icon": "🎯"
+            },
+            {
+                "value": SessionType.LEVEL_PROGRESSION.value,
+                "name": "Level Progression",
+                "description": "Progressive difficulty levels",
+                "icon": "📈"
+            },
+            {
+                "value": SessionType.WEAK_AREAS.value,
+                "name": "Weak Areas",
+                "description": "Focus on difficult vocabulary",
+                "icon": "💪"
+            },
+            {
+                "value": SessionType.RANDOM.value,
+                "name": "Random",
+                "description": "Random selection of cards",
+                "icon": "🎲"
+            },
+            {
+                "value": SessionType.CUSTOM.value,
+                "name": "Custom",
+                "description": "Customized session settings",
+                "icon": "⚙️"
+            }
+        ]
+    }
+
+@app.get("/flashcard/difficulty-ratings", tags=["Flashcards"])
+async def get_difficulty_ratings():
+    """Get available difficulty ratings"""
+    return {
+        "success": True,
+        "message": "Available difficulty ratings",
+        "difficulty_ratings": [
+            {
+                "value": DifficultyRating.EASY.value,
+                "name": "Easy",
+                "description": "I knew this well",
+                "color": "green",
+                "icon": "😊"
+            },
+            {
+                "value": DifficultyRating.MEDIUM.value,
+                "name": "Medium",
+                "description": "I knew this but took some time",
+                "color": "yellow",
+                "icon": "😐"
+            },
+            {
+                "value": DifficultyRating.HARD.value,
+                "name": "Hard",
+                "description": "I struggled with this",
+                "color": "orange",
+                "icon": "😰"
+            },
+            {
+                "value": DifficultyRating.AGAIN.value,
+                "name": "Again",
+                "description": "I need to review this again soon",
+                "color": "red",
+                "icon": "😵"
+            }
+        ]
+    }
+
+@app.post("/flashcard/quick-session", tags=["Flashcards"])
+async def create_quick_flashcard_session(
+    request: dict,
+    current_user: str = Depends(get_current_user)
+):
+    """Create a quick flashcard session with smart defaults"""
+    try:
+        # Ensure user exists in profiles table
+        await ensure_user_exists(current_user)
+        
+        # Create request with smart defaults
+        session_request = FlashcardSessionRequest(
+            session_name=f"Quick Session - {datetime.now().strftime('%H:%M')}",
+            session_type=SessionType(request.get("session_type", "daily_review")),
+            study_mode=StudyMode(request.get("study_mode", "mixed")),
+            topic_name=request.get("topic_name"),
+            category_name=request.get("category_name"),
+            level=CEFRLevel(request.get("level")) if request.get("level") else None,
+            max_cards=request.get("max_cards", 10),
+            time_limit_minutes=request.get("time_limit_minutes"),
+            include_reviewed=request.get("include_reviewed", False),
+            include_favorites=request.get("include_favorites", False),
+            smart_selection=request.get("smart_selection", True)
+        )
+        
+        session_id = db.create_flashcard_session(current_user, session_request)
+        
+        # Get the created session and first card
+        session_data = db.get_flashcard_session(session_id)
+        current_card = db.get_current_flashcard(session_id)
+        
+        return {
+            "success": True,
+            "message": f"Quick {session_request.study_mode.value} session created",
+            "session_id": session_id,
+            "session": session_data,
+            "current_card": current_card
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create quick session: {str(e)}")
+
+@app.get("/flashcard/sessions", tags=["Flashcards"])
+async def get_flashcard_sessions(
+    limit: int = 50,
+    current_user: str = Depends(get_current_user)
+):
+    """Get user's flashcard sessions"""
+    try:
+        sessions = db.get_flashcard_sessions(current_user, limit)
+        
+        return {
+            "success": True,
+            "message": f"Retrieved {len(sessions)} flashcard sessions",
+            "sessions": sessions
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get flashcard sessions: {str(e)}")
+
+@app.get("/flashcard/session/{session_id}", tags=["Flashcards"])
+async def get_flashcard_session(
+    session_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Get a specific flashcard session"""
+    try:
+        session = db.get_flashcard_session(session_id)
+        
+        if not session or session["user_id"] != current_user:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        return {
+            "success": True,
+            "message": "Session retrieved successfully",
+            "session": session
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get session: {str(e)}")
+
+@app.delete("/flashcard/session/{session_id}", tags=["Flashcards"])
+async def delete_flashcard_session(
+    session_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Delete a flashcard session"""
+    try:
+        success = db.delete_flashcard_session(session_id, current_user)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        return {
+            "success": True,
+            "message": "Session deleted successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete session: {str(e)}")
+
+@app.get("/flashcard/stats", response_model=FlashcardStats, tags=["Flashcards"])
+async def get_flashcard_stats(current_user: str = Depends(get_current_user)):
+    """Get flashcard statistics for the user"""
+    try:
+        stats = db.get_flashcard_stats(current_user)
+        
+        return FlashcardStats(**stats)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get flashcard stats: {str(e)}")
+
+@app.get("/user/profile", tags=["User Management"])
+async def get_user_profile(current_user: str = Depends(get_current_user)):
+    """Get current user profile information"""
+    try:
+        # Ensure user exists
+        await ensure_user_exists(current_user)
+        
+        # Get user profile
+        result = db.client.table("profiles").select("*").eq("id", current_user).execute()
+        
+        if result.data:
+            return {
+                "success": True,
+                "message": "User profile retrieved successfully",
+                "user_id": current_user,
+                "profile": result.data[0]
+            }
+        else:
+            raise HTTPException(status_code=404, detail="User profile not found")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get user profile: {str(e)}")
+
+@app.get("/vocab/discover", tags=["Vocabulary Discovery"])
+async def discover_vocabulary(
+    topic_name: str = None,
+    category_name: str = None,
+    level: str = None,
+    limit: int = 20,
+    current_user: str = Depends(get_current_user)
+):
+    """Discover vocabulary from global pool that user hasn't saved yet"""
+    try:
+        await ensure_user_exists(current_user)
+        
+        # Get global vocabulary entries
+        from models import CEFRLevel
+        level_enum = CEFRLevel(level) if level else None
+        
+        result = db.get_vocab_entries(
+            topic_name=topic_name,
+            category_name=category_name,
+            level=level_enum,
+            limit=limit * 2  # Get more to filter out user's saved ones
+        )
+        
+        if not result:
+            return {
+                "success": True,
+                "message": "No vocabulary found for the specified criteria",
+                "vocabulary": [],
+                "total_found": 0
+            }
+        
+        # Get user's saved vocabulary IDs to filter them out
+        user_saved_result = db.client.table("user_vocab_entries").select("vocab_entry_id").eq("user_id", current_user).execute()
+        user_saved_ids = {row["vocab_entry_id"] for row in user_saved_result.data} if user_saved_result.data else set()
+        
+        # Filter out already saved vocabulary
+        available_vocab = []
+        for entry in result:
+            if entry["id"] not in user_saved_ids:
+                available_vocab.append({
+                    "id": entry["id"],
+                    "word": entry["word"],
+                    "definition": entry["definition"],
+                    "translation": entry["translation"],
+                    "example": entry["example"],
+                    "example_translation": entry["example_translation"],
+                    "level": entry["level"],
+                    "part_of_speech": entry["part_of_speech"],
+                    "topic_name": topic_name,
+                    "target_language": entry.get("target_language"),
+                    "original_language": entry.get("original_language")
+                })
+                
+                if len(available_vocab) >= limit:
+                    break
+        
+        return {
+            "success": True,
+            "message": f"Found {len(available_vocab)} new vocabulary items to discover",
+            "vocabulary": available_vocab,
+            "total_found": len(available_vocab)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to discover vocabulary: {str(e)}")
+
+@app.get("/flashcard/review-cards", tags=["Flashcards"])
+async def get_cards_for_review(
+    limit: int = 20,
+    current_user: str = Depends(get_current_user)
+):
+    """Get cards that are due for review based on spaced repetition"""
+    try:
+        cards = db.get_cards_for_review(current_user, limit)
+        
+        return {
+            "success": True,
+            "message": f"Found {len(cards)} cards due for review",
+            "cards": cards
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get review cards: {str(e)}")
 
 # =========== Main Application ===========
 

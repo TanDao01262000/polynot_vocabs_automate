@@ -1,6 +1,6 @@
 # AI Vocabulary Generator API
 
-A FastAPI-based vocabulary generation service with user management and Supabase integration.
+A comprehensive FastAPI-based vocabulary generation service with advanced flashcard system, user management, and Supabase integration.
 
 ## 🚀 Quick Start
 
@@ -76,14 +76,29 @@ Once the server is running, you can access:
 - **Interactive API Docs**: http://localhost:8001/docs (Swagger UI)
 - **Alternative Docs**: http://localhost:8001/redoc (ReDoc)
 
-## 🧪 Testing the API
+## 🧪 Testing
 
-### Health Check
+### Run All Tests
+```bash
+# Run comprehensive test suite
+make test
+
+# Run tests locally (without Docker)
+make test-local
+
+# Run specific tests
+make test-flashcard
+make test-comprehensive
+```
+
+### Manual API Testing
+
+#### Health Check
 ```bash
 curl http://localhost:8001/health
 ```
 
-### Generate Vocabulary
+#### Generate Vocabulary
 ```bash
 curl -X POST http://localhost:8001/generate/single \
   -H "Content-Type: application/json" \
@@ -95,15 +110,20 @@ curl -X POST http://localhost:8001/generate/single \
   }'
 ```
 
-### Test Endpoints
+#### Test Flashcard System
 ```bash
-# Test save functionality
-curl -X POST http://localhost:8001/vocab/test-save \
-  -H "Authorization: Bearer YOUR_USER_ID"
+# Get study modes
+curl http://localhost:8001/flashcard/study-modes
 
-# Test list functionality
-curl -X GET http://localhost:8001/vocab/test-list \
-  -H "Authorization: Bearer YOUR_USER_ID"
+# Create quick session
+curl -X POST http://localhost:8001/flashcard/quick-session \
+  -H "Content-Type: application/json" \
+  -H "Authorization: YOUR_USER_ID" \
+  -d '{
+    "study_mode": "mixed",
+    "max_cards": 5,
+    "session_type": "daily_review"
+  }'
 ```
 
 ## 🏗️ Development
@@ -114,14 +134,32 @@ The development server automatically reloads when you make changes to your code 
 ### File Structure
 ```
 ├── vocab_api.py           # Main FastAPI application
-├── models.py              # Data models
+├── models.py              # Data models and schemas
 ├── supabase_database.py   # Database operations
 ├── vocab_agent.py         # Vocabulary generation logic
-├── config.py              # Configuration
+├── config.py              # Configuration management
 ├── topics.py              # Topic management
+├── main.py                # CLI examples and demos
+├── run_tests.py           # Test runner script
+├── tests/                 # Test files
+│   ├── test_flashcard_system.py
+│   ├── test_flashcard_endpoints.py
+│   ├── test_flashcard_with_data.py
+│   └── comprehensive_test_suite.py
+├── scripts/               # Utility scripts
+│   ├── check_users.py
+│   ├── apply_rls_fix.py
+│   └── setup_flashcard_tables.py
+├── docs/                  # Documentation
+│   ├── FLASHCARD_README.md
+│   ├── FLASHCARD_SETUP.md
+│   ├── flashcard_schema.sql
+│   └── FLASHCARD_TEST_RESULTS.md
 ├── docker-compose.yml     # Docker configuration
 ├── Dockerfile             # Container definition
-└── requirements.txt       # Python dependencies
+├── requirements.txt       # Python dependencies
+├── Makefile              # Build and test commands
+└── README.md             # This file
 ```
 
 ### Making Changes
@@ -166,21 +204,55 @@ sudo chown -R $USER:$USER .
 
 ## 📝 Available Endpoints
 
-### Generation
+### Core API
+- `GET /` - API information and status
+- `GET /health` - Health check endpoint
+
+### Vocabulary Generation
 - `POST /generate/single` - Generate vocabulary for single topic
 - `POST /generate/multiple` - Generate vocabulary for multiple topics
 - `POST /generate/category` - Generate vocabulary for category
 
-### User Vocabulary
+### User Vocabulary Management
+- `GET /vocab/list` - Get paginated vocabulary list with filters
 - `GET /vocab/user-saved` - Get user's saved vocabulary
-- `POST /vocab/save` - Save vocabulary to user's list
-- `POST /vocab/hide-toggle` - Hide/unhide vocabulary
-- `POST /vocab/review-toggle` - Mark/unmark as reviewed
+- `POST /vocab/save-to-user` - Save vocabulary to user's list
+- `POST /vocab/favorite` - Toggle favorite status
+- `POST /vocab/hide` - Hide/unhide vocabulary
+- `POST /vocab/review` - Mark/unmark as reviewed
+- `POST /vocab/note` - Add personal notes
+- `POST /vocab/rate` - Rate difficulty (1-5)
 
-### Topics
+### Vocabulary Lists
+- `POST /vocab/lists` - Create vocabulary list
+- `GET /vocab/lists` - Get user's vocabulary lists
+- `POST /vocab/lists/{id}/add` - Add vocab to list
+- `DELETE /vocab/lists/{id}/remove` - Remove vocab from list
+
+### Advanced Flashcard System
+- `POST /flashcard/session/create` - Create flashcard session
+- `GET /flashcard/session/{id}/current` - Get current card
+- `POST /flashcard/session/{id}/answer` - Submit answer
+- `POST /flashcard/quick-session` - Create quick session
+- `GET /flashcard/sessions` - Get user's sessions
+- `GET /flashcard/stats` - Get flashcard statistics
+- `GET /flashcard/analytics` - Get analytics data
+- `GET /flashcard/review-cards` - Get cards due for review
+
+### Study Configuration
+- `GET /flashcard/study-modes` - Get available study modes
+- `GET /flashcard/session-types` - Get session types
+- `GET /flashcard/difficulty-ratings` - Get difficulty ratings
+
+### Topics & Categories
 - `GET /categories` - Get all categories
 - `GET /topics/{category}` - Get topics by category
 - `GET /topics` - Get all topics
+
+### Testing Endpoints
+- `POST /test/create-user` - Create test user
+- `POST /vocab/test-save` - Test save functionality
+- `GET /vocab/test-list` - Test list functionality
 
 ## 🤝 Contributing
 
