@@ -11,6 +11,7 @@ import os
 from dotenv import load_dotenv
 import json
 from datetime import datetime, timedelta
+import re
 
 load_dotenv(override=True)
 
@@ -24,6 +25,36 @@ class SupabaseVocabDatabase:
             raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY must be set in environment variables")
         
         self.client: Client = create_client(self.supabase_url, self.supabase_key)
+    
+    def _parse_date(self, date_str: str) -> Optional[datetime]:
+        """Parse various date formats from Supabase"""
+        if not date_str:
+            return None
+        
+        try:
+            # Handle different date formats
+            if date_str.endswith('Z'):
+                return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            elif '+' in date_str or date_str.count('-') > 2:
+                return datetime.fromisoformat(date_str)
+            else:
+                # Handle format like '2025-09-07T21:29:27.33124' (microseconds without timezone)
+                # Remove extra microseconds digits if present
+                if '.' in date_str and 'T' in date_str:
+                    # Split on the dot and keep only 6 digits for microseconds
+                    parts = date_str.split('.')
+                    if len(parts) == 2:
+                        date_part = parts[0]
+                        microsecond_part = parts[1]
+                        # Keep only first 6 digits of microseconds
+                        if len(microsecond_part) > 6:
+                            microsecond_part = microsecond_part[:6]
+                        date_str = f"{date_part}.{microsecond_part}"
+                
+                return datetime.fromisoformat(date_str)
+        except ValueError as e:
+            print(f"Warning: Could not parse date {date_str}: {e}")
+            return None
     
     def get_topic_id(self, topic_name: str, category_name: str = None) -> Optional[str]:
         """Get topic ID by name (category not used)."""
@@ -2083,22 +2114,27 @@ Do not include any other text or explanations."""
             for session in sessions:
                 created_at = session.get("created_at")
                 if created_at:
-                    hour = datetime.fromisoformat(created_at.replace('Z', '+00:00')).hour
-                    time_slot = f"{hour//4*4:02d}-{(hour//4*4+4)%24:02d}"
-                    time_distribution[time_slot] = time_distribution.get(time_slot, 0) + 1
+                    dt = self._parse_date(created_at)
+                    if dt:
+                        hour = dt.hour
+                        time_slot = f"{hour//4*4:02d}-{(hour//4*4+4)%24:02d}"
+                        time_distribution[time_slot] = time_distribution.get(time_slot, 0) + 1
             
             # Performance trends
             daily_performance = {}
             for session in sessions:
                 created_at = session.get("created_at")
                 if created_at:
-                    date = datetime.fromisoformat(created_at.replace('Z', '+00:00')).date()
-                    if date not in daily_performance:
-                        daily_performance[date] = {"sessions": 0, "correct": 0, "total": 0}
-                    
-                    daily_performance[date]["sessions"] += 1
-                    daily_performance[date]["correct"] += session.get("correct_answers", 0)
-                    daily_performance[date]["total"] += session.get("total_cards", 0)
+                    dt = self._parse_date(created_at)
+                    if dt:
+                        date = dt.date()
+                        if date not in daily_performance:
+                            daily_performance[date] = {"sessions": 0, "correct": 0, "total": 0}
+                        
+                        daily_performance[date]["sessions"] += 1
+                        
+                        daily_performance[date]["correct"] += session.get("correct_answers", 0)
+                        daily_performance[date]["total"] += session.get("total_cards", 0)
             
             return {
                 "period_days": days,
@@ -2237,8 +2273,10 @@ Do not include any other text or explanations."""
             for session in sessions:
                 created_at = session.get("created_at")
                 if created_at:
-                    study_date = datetime.fromisoformat(created_at.replace('Z', '+00:00')).date()
-                    study_dates.add(study_date)
+                    dt = self._parse_date(created_at)
+                    if dt:
+                        study_date = dt.date()
+                        study_dates.add(study_date)
             
             if not study_dates:
                 return 0
