@@ -1987,6 +1987,115 @@ async def get_cards_for_review(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get review cards: {str(e)}")
 
+# =========== CACHE MANAGEMENT ENDPOINTS ===========
+
+@app.get("/cache/stats", tags=["Cache Management"])
+async def get_cache_statistics():
+    """Get validation cache performance statistics"""
+    try:
+        from semantic_validator import semantic_validator
+        stats = semantic_validator.get_cache_stats()
+        
+        return {
+            "success": True,
+            "message": "Cache statistics retrieved successfully",
+            "cache_stats": stats
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get cache statistics: {str(e)}")
+
+@app.post("/cache/clear", tags=["Cache Management"])
+async def clear_validation_cache(older_than_hours: Optional[int] = None):
+    """Clear validation cache entries"""
+    try:
+        from semantic_validator import semantic_validator
+        
+        if older_than_hours:
+            semantic_validator.clear_cache(older_than_hours)
+            message = f"Cleared cache entries older than {older_than_hours} hours"
+        else:
+            semantic_validator.clear_cache()
+            message = "Cleared all cache entries"
+        
+        return {
+            "success": True,
+            "message": message
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear cache: {str(e)}")
+
+@app.post("/cache/cleanup", tags=["Cache Management"])
+async def cleanup_expired_cache():
+    """Remove expired entries from validation cache"""
+    try:
+        from semantic_validator import semantic_validator
+        semantic_validator.cleanup_expired_cache()
+        
+        return {
+            "success": True,
+            "message": "Expired cache entries cleaned up successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to cleanup cache: {str(e)}")
+
+@app.get("/cache/performance", tags=["Cache Management"])
+async def get_cache_performance_summary():
+    """Get a summary of cache performance and cost savings"""
+    try:
+        from semantic_validator import semantic_validator
+        stats = semantic_validator.get_cache_stats()
+        
+        # Calculate cost savings (assuming $0.01 per AI call)
+        ai_calls = stats.get('ai_calls', 0)
+        total_requests = stats.get('total_requests', 0)
+        cache_hit_rate = stats.get('cache_hit_rate', 0)
+        
+        # Estimate cost savings
+        estimated_cost_per_call = 0.01  # $0.01 per AI call
+        total_ai_calls_without_cache = total_requests
+        actual_ai_calls = ai_calls
+        cost_savings = (total_ai_calls_without_cache - actual_ai_calls) * estimated_cost_per_call
+        
+        return {
+            "success": True,
+            "message": "Cache performance summary retrieved successfully",
+            "performance_summary": {
+                "total_requests": total_requests,
+                "ai_calls_made": actual_ai_calls,
+                "cache_hit_rate": f"{cache_hit_rate:.1f}%",
+                "ai_call_reduction": f"{((total_requests - actual_ai_calls) / total_requests * 100):.1f}%" if total_requests > 0 else "0%",
+                "estimated_cost_savings": f"${cost_savings:.2f}",
+                "exact_matches": stats.get('exact_matches', 0),
+                "similarity_matches": stats.get('similarity_matches', 0),
+                "memory_cache_hits": stats.get('memory_hits', 0),
+                "database_cache_hits": stats.get('db_hits', 0),
+                "memory_cache_size": stats.get('memory_cache_size', 0),
+                "database_cache_size": stats.get('db_cache_size', 0)
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get performance summary: {str(e)}")
+
+@app.get("/cache/quality", tags=["Cache Management"])
+async def validate_cache_quality(sample_size: int = 100):
+    """Validate cache quality to ensure fairness and accuracy across different answer variations"""
+    try:
+        from semantic_validator import semantic_validator
+        quality_report = semantic_validator.validate_cache_quality(sample_size)
+        
+        return {
+            "success": True,
+            "message": "Cache quality validation completed",
+            "quality_report": quality_report
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to validate cache quality: {str(e)}")
+
 # =========== Main Application ===========
 
 if __name__ == "__main__":

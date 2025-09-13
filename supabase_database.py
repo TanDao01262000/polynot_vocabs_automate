@@ -906,8 +906,8 @@ class SupabaseVocabDatabase:
     def create_test_flashcard_session(self, user_id: str, request: FlashcardSessionRequest) -> str:
         """Create a test flashcard session that works with existing vocabulary entries"""
         try:
-            # Get vocabulary cards directly from vocab_entries table (for testing)
-            cards = self._get_test_flashcard_cards(
+            # Get vocabulary cards using AI curation for more interesting sessions
+            cards = self._get_ai_curated_flashcard_cards(
                 topic_name=request.topic_name,
                 category_name=request.category_name,
                 level=request.level,
@@ -1011,9 +1011,9 @@ class SupabaseVocabDatabase:
             user_vocab_result = user_vocab_query.execute()
             
             if not user_vocab_result.data:
-                # FALLBACK: If user has no saved vocabulary, use global vocabulary pool
-                print(f"User {user_id} has no saved vocabulary. Using global vocabulary pool.")
-                return self._get_global_flashcard_cards(
+                # FALLBACK: If user has no saved vocabulary, use AI-curated vocabulary pool
+                print(f"User {user_id} has no saved vocabulary. Using AI-curated vocabulary pool.")
+                return self._get_ai_curated_flashcard_cards(
                     topic_name=topic_name,
                     category_name=category_name,
                     level=level,
@@ -1213,14 +1213,20 @@ class SupabaseVocabDatabase:
             if level:
                 query = query.eq("level", level.value)
             
-            result = query.limit(max_cards).order("created_at", desc=True).execute()
+            # Get more entries than needed for random selection
+            result = query.limit(max_cards * 3).execute()
             
             if not result.data:
                 return []
             
+            # Randomly shuffle and select cards for variety
+            import random
+            random.shuffle(result.data)
+            selected_data = result.data[:max_cards]
+            
             # Convert to card format
             cards = []
-            for vocab_row in result.data:
+            for vocab_row in selected_data:
                 card = {
                     "vocab_entry_id": vocab_row["id"],
                     "word": vocab_row["word"],
@@ -1241,7 +1247,7 @@ class SupabaseVocabDatabase:
                 }
                 cards.append(card)
             
-            return cards[:max_cards]
+            return cards
             
         except Exception as e:
             print(f"Error getting global flashcard cards: {e}")
@@ -1266,14 +1272,20 @@ class SupabaseVocabDatabase:
             if level:
                 query = query.eq("level", level.value)
             
-            result = query.limit(max_cards).order("created_at", desc=True).execute()
+            # Get more entries than needed for random selection
+            result = query.limit(max_cards * 3).execute()
             
             if not result.data:
                 return []
             
+            # Randomly shuffle and select cards for variety
+            import random
+            random.shuffle(result.data)
+            selected_data = result.data[:max_cards]
+            
             # Convert to card format
             cards = []
-            for vocab_row in result.data:
+            for vocab_row in selected_data:
                 card = {
                     "vocab_entry_id": vocab_row["id"],
                     "word": vocab_row["word"],
@@ -1294,11 +1306,209 @@ class SupabaseVocabDatabase:
                 }
                 cards.append(card)
             
-            return cards[:max_cards]
+            return cards
             
         except Exception as e:
             print(f"Error getting test flashcard cards: {e}")
             raise
+    
+    def _get_ai_curated_flashcard_cards(self, topic_name: str = None, category_name: str = None,
+                                       level: CEFRLevel = None, max_cards: int = 20, 
+                                       use_ai_curation: bool = True) -> List[Dict[str, Any]]:
+        """Get AI-curated vocabulary cards for more interesting and diverse sessions"""
+        try:
+            # First get a larger pool of vocabulary
+            query = self.client.table("vocab_entries").select("""
+                id, word, definition, translation, example, example_translation,
+                level, part_of_speech, topic_id, target_language, original_language
+            """)
+            
+            # Apply filters
+            if topic_name:
+                topic_id = self.get_topic_id(topic_name, category_name)
+                if topic_id:
+                    query = query.eq("topic_id", topic_id)
+            
+            if level:
+                query = query.eq("level", level.value)
+            
+            # Get a larger pool for AI curation
+            result = query.limit(max_cards * 5).execute()
+            
+            if not result.data or len(result.data) < max_cards:
+                # Fallback to random selection if not enough data
+                return self._get_global_flashcard_cards(topic_name, category_name, level, max_cards)
+            
+            # Skip AI curation if requested (for faster random selection)
+            if not use_ai_curation:
+                import random
+                random.shuffle(result.data)
+                selected_data = result.data[:max_cards]
+                
+                cards = []
+                for vocab_row in selected_data:
+                    card = {
+                        "vocab_entry_id": vocab_row["id"],
+                        "word": vocab_row["word"],
+                        "definition": vocab_row["definition"],
+                        "translation": vocab_row["translation"],
+                        "example": vocab_row["example"],
+                        "example_translation": vocab_row["example_translation"],
+                        "part_of_speech": vocab_row["part_of_speech"],
+                        "level": vocab_row["level"],
+                        "topic_name": topic_name,
+                        "is_favorite": False,
+                        "review_count": 0,
+                        "last_reviewed": None,
+                        "difficulty_rating": None,
+                        "personal_notes": None,
+                        "mastery_level": 0.0,
+                        "next_review_date": datetime.now()
+                    }
+                    cards.append(card)
+                
+                return cards
+            
+            # Use AI to curate an interesting mix (with timeout fallback)
+            try:
+                from semantic_validator import semantic_validator
+                import time
+                
+                # Create a prompt for AI curation
+                vocab_list = []
+                for vocab_row in result.data:
+                    vocab_list.append(f"- {vocab_row['word']} ({vocab_row['part_of_speech']}): {vocab_row['definition']}")
+                
+                # Add randomness to the prompt to get different selections
+                import random
+                random.shuffle(vocab_list)  # Shuffle the vocabulary list first
+                
+                # Create different prompts for variety
+                prompt_variations = [
+                    "Create an engaging mix of practical and interesting vocabulary",
+                    "Focus on commonly used words that are essential for daily communication", 
+                    "Select vocabulary that builds confidence and encourages learning",
+                    "Choose words that are memorable and fun to learn",
+                    "Pick vocabulary that covers different aspects of the topic"
+                ]
+                
+                selected_prompt_style = random.choice(prompt_variations)
+                
+                curation_prompt = f"""You are an expert language teacher curating a diverse and engaging vocabulary session.
+
+Available vocabulary for {topic_name or 'general topics'} (CEFR level {level.value if level else 'mixed'}):
+{chr(10).join(vocab_list[:50])}  # Limit to first 50 for prompt length
+
+{selected_prompt_style}. Please select {max_cards} vocabulary items that would create the most interesting and educational flashcard session. Consider:
+
+1. **Diversity**: Mix of parts of speech (nouns, verbs, adjectives, etc.)
+2. **Difficulty variety**: Include both easier and more challenging words
+3. **Practical relevance**: Words that are useful and commonly used
+4. **Learning progression**: Words that build upon each other
+5. **Engagement**: Interesting and memorable vocabulary
+
+Return ONLY the words you select, one per line, in this exact format:
+word1
+word2
+word3
+...
+
+Do not include any other text or explanations."""
+
+                # Get AI curation
+                ai_response = semantic_validator.llm.invoke(curation_prompt)
+                selected_words = [word.strip() for word in ai_response.content.strip().split('\n') if word.strip()]
+                
+                # Filter the original data to only include AI-selected words
+                selected_cards = []
+                for vocab_row in result.data:
+                    if vocab_row['word'] in selected_words and len(selected_cards) < max_cards:
+                        card = {
+                            "vocab_entry_id": vocab_row["id"],
+                            "word": vocab_row["word"],
+                            "definition": vocab_row["definition"],
+                            "translation": vocab_row["translation"],
+                            "example": vocab_row["example"],
+                            "example_translation": vocab_row["example_translation"],
+                            "part_of_speech": vocab_row["part_of_speech"],
+                            "level": vocab_row["level"],
+                            "topic_name": topic_name,
+                            "is_favorite": False,
+                            "review_count": 0,
+                            "last_reviewed": None,
+                            "difficulty_rating": None,
+                            "personal_notes": None,
+                            "mastery_level": 0.0,
+                            "next_review_date": datetime.now()
+                        }
+                        selected_cards.append(card)
+                
+                # If AI didn't select enough, fill with random selection
+                if len(selected_cards) < max_cards:
+                    remaining_needed = max_cards - len(selected_cards)
+                    remaining_cards = [vocab_row for vocab_row in result.data 
+                                     if vocab_row['word'] not in selected_words]
+                    import random
+                    random.shuffle(remaining_cards)
+                    
+                    for vocab_row in remaining_cards[:remaining_needed]:
+                        card = {
+                            "vocab_entry_id": vocab_row["id"],
+                            "word": vocab_row["word"],
+                            "definition": vocab_row["definition"],
+                            "translation": vocab_row["translation"],
+                            "example": vocab_row["example"],
+                            "example_translation": vocab_row["example_translation"],
+                            "part_of_speech": vocab_row["part_of_speech"],
+                            "level": vocab_row["level"],
+                            "topic_name": topic_name,
+                            "is_favorite": False,
+                            "review_count": 0,
+                            "last_reviewed": None,
+                            "difficulty_rating": None,
+                            "personal_notes": None,
+                            "mastery_level": 0.0,
+                            "next_review_date": datetime.now()
+                        }
+                        selected_cards.append(card)
+                
+                return selected_cards[:max_cards]
+                
+            except Exception as ai_error:
+                print(f"AI curation failed, falling back to random selection: {ai_error}")
+                # Fallback to random selection
+                import random
+                random.shuffle(result.data)
+                selected_data = result.data[:max_cards]
+                
+                cards = []
+                for vocab_row in selected_data:
+                    card = {
+                        "vocab_entry_id": vocab_row["id"],
+                        "word": vocab_row["word"],
+                        "definition": vocab_row["definition"],
+                        "translation": vocab_row["translation"],
+                        "example": vocab_row["example"],
+                        "example_translation": vocab_row["example_translation"],
+                        "part_of_speech": vocab_row["part_of_speech"],
+                        "level": vocab_row["level"],
+                        "topic_name": topic_name,
+                        "is_favorite": False,
+                        "review_count": 0,
+                        "last_reviewed": None,
+                        "difficulty_rating": None,
+                        "personal_notes": None,
+                        "mastery_level": 0.0,
+                        "next_review_date": datetime.now()
+                    }
+                    cards.append(card)
+                
+                return cards
+            
+        except Exception as e:
+            print(f"Error getting AI-curated flashcard cards: {e}")
+            # Final fallback to basic method
+            return self._get_global_flashcard_cards(topic_name, category_name, level, max_cards)
     
     def _get_correct_answer_for_mode(self, card: Dict[str, Any], study_mode: StudyMode) -> str:
         """Get correct answer based on study mode"""
@@ -1306,6 +1516,8 @@ class SupabaseVocabDatabase:
             return card["word"]
         elif study_mode == StudyMode.PRACTICE:
             return card["definition"]
+
+        # Will implement later
         elif study_mode == StudyMode.WRITE:
             return card["word"]
         elif study_mode == StudyMode.SPELLING:
@@ -1329,7 +1541,7 @@ class SupabaseVocabDatabase:
         user_answer = user_answer.strip()
         correct_answer = correct_answer.strip()
         
-        # Import semantic validator
+        # Use AI-powered semantic validation as the ONLY method
         try:
             from semantic_validator import semantic_validator
             
@@ -1351,13 +1563,21 @@ class SupabaseVocabDatabase:
                 context=context
             )
             
-            return result.is_correct, result.confidence_score, result.reasoning
+            # Return enhanced feedback including encouragement and learning tips
+            enhanced_reasoning = result.reasoning
+            if result.feedback:
+                enhanced_reasoning += f"\n\n💡 Learning Tip: {result.feedback}"
+            if result.encouragement:
+                enhanced_reasoning += f"\n\n🌟 {result.encouragement}"
             
-        except ImportError:
-            print("Warning: Semantic validator not available, falling back to basic validation")
-            # Fallback to basic validation
-            is_correct = self._validate_answer_basic(user_answer, correct_answer, study_mode)
-            return is_correct, 1.0 if is_correct else 0.0, "Basic validation (AI unavailable)"
+            return result.is_correct, result.confidence_score, enhanced_reasoning
+            
+        except ImportError as e:
+            print(f"Error: Semantic validator not available: {e}")
+            raise ValueError(f"AI validation is required but not available: {e}")
+        except Exception as e:
+            print(f"Error in AI validation: {e}")
+            raise ValueError(f"AI validation failed: {e}")
     
     def _validate_answer_basic(self, user_answer: str, correct_answer: str, study_mode: str) -> bool:
         """Basic fallback validation when AI is not available"""
@@ -1574,7 +1794,7 @@ class SupabaseVocabDatabase:
     
     def _check_paraphrase_similarity(self, user_text: str, correct_text: str) -> bool:
         """Check for paraphrases using synonym detection"""
-        # Simple synonym mapping for common words
+        # Enhanced synonym mapping for common words and phrases
         synonyms = {
             'big': ['large', 'huge', 'enormous', 'massive'],
             'small': ['little', 'tiny', 'miniature', 'compact'],
@@ -1588,16 +1808,41 @@ class SupabaseVocabDatabase:
             'stupid': ['foolish', 'dumb', 'silly', 'unintelligent'],
             'beautiful': ['pretty', 'lovely', 'gorgeous', 'attractive'],
             'ugly': ['unattractive', 'hideous', 'repulsive'],
-            'easy': ['simple', 'effortless', 'straightforward'],
-            'hard': ['difficult', 'challenging', 'tough', 'complex'],
+            'easy': ['simple', 'effortless', 'straightforward', 'very easy', 'extremely easy', 'super easy', 'really easy', 'quite easy'],
+            'hard': ['difficult', 'challenging', 'tough', 'complex', 'very hard', 'extremely hard', 'super hard', 'really hard', 'quite hard'],
             'new': ['fresh', 'recent', 'modern', 'latest'],
             'old': ['ancient', 'aged', 'elderly', 'vintage']
+        }
+        
+        # Multi-word phrase synonyms (idioms and expressions)
+        phrase_synonyms = {
+            'piece of cake': ['very easy', 'extremely easy', 'super easy', 'really easy', 'quite easy', 'easy', 'simple', 'effortless', 'straightforward', 'walk in the park', 'breeze', 'no problem', 'childs play'],
+            'walk in the park': ['piece of cake', 'very easy', 'easy', 'simple', 'effortless', 'breeze'],
+            'breeze': ['piece of cake', 'walk in the park', 'very easy', 'easy', 'simple', 'effortless'],
+            'no problem': ['piece of cake', 'very easy', 'easy', 'simple', 'effortless'],
+            'childs play': ['piece of cake', 'very easy', 'easy', 'simple', 'effortless'],
+            'very easy': ['piece of cake', 'walk in the park', 'breeze', 'no problem', 'childs play', 'easy', 'simple', 'effortless', 'straightforward'],
+            'extremely easy': ['piece of cake', 'very easy', 'easy', 'simple', 'effortless'],
+            'super easy': ['piece of cake', 'very easy', 'easy', 'simple', 'effortless'],
+            'really easy': ['piece of cake', 'very easy', 'easy', 'simple', 'effortless'],
+            'quite easy': ['piece of cake', 'very easy', 'easy', 'simple', 'effortless']
         }
         
         user_words = user_text.split()
         correct_words = correct_text.split()
         
-        # Check if words are synonyms
+        # First check for exact phrase matches in phrase_synonyms
+        user_phrase = user_text.lower().strip()
+        correct_phrase = correct_text.lower().strip()
+        
+        # Check if either phrase is in the phrase synonyms
+        for phrase, synonyms_list in phrase_synonyms.items():
+            if user_phrase == phrase and correct_phrase in synonyms_list:
+                return True
+            if correct_phrase == phrase and user_phrase in synonyms_list:
+                return True
+        
+        # Check if words are synonyms (single word matching)
         for user_word in user_words:
             for correct_word in correct_words:
                 if user_word in synonyms and correct_word in synonyms[user_word]:
@@ -1698,6 +1943,7 @@ class SupabaseVocabDatabase:
                 "user_answer": request.user_answer,
                 "response_time_seconds": request.response_time_seconds,
                 "confidence_score": confidence_score,
+                "feedback": reasoning,  # Enhanced feedback with learning tips and encouragement
                 "session_complete": session_update.get("current_card_index", 0) >= session["total_cards"],
                 "progress": {
                     "correct_answers": session_update.get("correct_answers", session["correct_answers"]),
