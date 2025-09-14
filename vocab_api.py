@@ -14,11 +14,18 @@ from models import (
     CEFRLevel, VocabListViewRequest, VocabListViewResponse, VocabEntryActionRequest, 
     VocabListRequest, VocabListResponse, FlashcardSessionRequest, FlashcardAnswerRequest,
     FlashcardSessionResponse, StudyMode, DifficultyRating, FlashcardCard, FlashcardStats,
-    SessionType, SpacedRepetitionSettings, StudyReminder, FlashcardAchievement
+    SessionType, SpacedRepetitionSettings, StudyReminder, FlashcardAchievement,
+    # TTS Models
+    TTSRequest, TTSResponse, VoiceCloneRequest, VoiceCloneResponse, 
+    UserVoiceProfile, UserSubscription, SubscriptionPlan,
+    # Pronunciation Models
+    PronunciationRequest, PronunciationResponse, VocabPronunciation, PronunciationType
 )
 from config import Config
 from topics import get_categories, get_topics_by_category, get_topic_list
 from supabase_database import SupabaseVocabDatabase
+from tts_service import TTSService
+from pronunciation_service import pronunciation_service
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -38,8 +45,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize database
+# Initialize database and services
 db = SupabaseVocabDatabase()
+tts_service = TTSService()
 
 # In-memory session storage (in production, use Redis or database)
 active_sessions = {}
@@ -2095,6 +2103,255 @@ async def validate_cache_quality(sample_size: int = 100):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to validate cache quality: {str(e)}")
+
+# =========== TTS (TEXT-TO-SPEECH) ENDPOINTS ===========
+
+@app.post("/tts/generate", response_model=TTSResponse, tags=["TTS"])
+async def generate_tts(
+    request: TTSRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Generate TTS audio for vocabulary or custom text"""
+    try:
+        response = await tts_service.generate_tts(request, current_user)
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
+
+@app.post("/tts/generate-vocab/{vocab_entry_id}", response_model=TTSResponse, tags=["TTS"])
+async def generate_vocab_tts(
+    vocab_entry_id: str,
+    current_user: str = Depends(get_current_user),
+    voice_id: Optional[str] = None,
+    language: str = "en-US"
+):
+    """Generate TTS audio for a specific vocabulary entry"""
+    try:
+        # Get vocabulary entry
+        result = db.client.table("vocab_entries").select("*").eq("id", vocab_entry_id).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Vocabulary entry not found")
+        
+        vocab_entry = result.data[0]
+        
+        # Create TTS request
+        tts_request = TTSRequest(
+            text=vocab_entry["word"],
+            vocab_entry_id=vocab_entry_id,
+            voice_id=voice_id,
+            language=language
+        )
+        
+        response = await tts_service.generate_tts(tts_request, current_user)
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Vocabulary TTS generation failed: {str(e)}")
+
+@app.post("/tts/voice-clone", response_model=VoiceCloneResponse, tags=["TTS"])
+async def create_voice_clone(
+    request: VoiceCloneRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Create a voice clone for the user"""
+    try:
+        result = await tts_service.create_voice_clone(
+            user_id=current_user,
+            voice_name=request.voice_name,
+            audio_files=request.audio_files
+        )
+        
+        return VoiceCloneResponse(
+            success=result["success"],
+            message=result["message"],
+            estimated_processing_time=result.get("estimated_processing_time")
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Voice cloning failed: {str(e)}")
+
+@app.get("/tts/voice-profiles", response_model=List[UserVoiceProfile], tags=["TTS"])
+async def get_voice_profiles(
+    current_user: str = Depends(get_current_user)
+):
+    """Get all voice profiles for the current user"""
+    try:
+        profiles = await tts_service.get_user_voice_profiles(current_user)
+        return profiles
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get voice profiles: {str(e)}")
+
+@app.get("/tts/subscription", response_model=UserSubscription, tags=["TTS"])
+async def get_user_subscription(
+    current_user: str = Depends(get_current_user)
+):
+    """Get user's subscription information"""
+    try:
+        subscription = await tts_service.get_user_subscription(current_user)
+        return subscription
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get subscription: {str(e)}")
+
+@app.get("/tts/quota", tags=["TTS"])
+async def get_tts_quota(
+    current_user: str = Depends(get_current_user)
+):
+    """Get user's TTS quota information"""
+    try:
+        subscription = await tts_service.get_user_subscription(current_user)
+        has_quota = await tts_service.check_tts_quota(current_user)
+        
+        # Get today's usage
+        today = datetime.now().date()
+        result = db.client.table("tts_usage").select("*").eq("user_id", current_user).eq("date", today.isoformat()).execute()
+        usage_count = len(result.data) if result.data else 0
+        
+        # Calculate quota limits
+        if subscription.plan == SubscriptionPlan.FREE:
+            max_requests = Config.MAX_FREE_TTS_REQUESTS_PER_DAY
+        else:
+            max_requests = Config.MAX_PREMIUM_TTS_REQUESTS_PER_DAY
+        
+        return {
+            "success": True,
+            "plan": subscription.plan.value,
+            "usage_today": usage_count,
+            "max_requests": max_requests,
+            "remaining_requests": max_requests - usage_count,
+            "has_quota": has_quota,
+            "features": subscription.features
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get quota information: {str(e)}")
+
+@app.delete("/tts/voice-profiles/{voice_profile_id}", tags=["TTS"])
+async def delete_voice_profile(
+    voice_profile_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Delete a voice profile"""
+    try:
+        # Verify ownership
+        result = db.client.table("user_voice_profiles").select("*").eq("id", voice_profile_id).eq("user_id", current_user).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Voice profile not found")
+        
+        # Deactivate the voice profile
+        db.client.table("user_voice_profiles").update({
+            "is_active": False,
+            "updated_at": datetime.now().isoformat()
+        }).eq("id", voice_profile_id).execute()
+        
+        return {
+            "success": True,
+            "message": "Voice profile deleted successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete voice profile: {str(e)}")
+
+# =========== PRONUNCIATION ENDPOINTS ===========
+
+@app.post("/pronunciation/generate", response_model=PronunciationResponse, tags=["Pronunciation"])
+async def generate_pronunciations(
+    request: PronunciationRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Generate multiple pronunciation versions for a vocabulary entry"""
+    try:
+        response = await pronunciation_service.generate_pronunciations(request, current_user)
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Pronunciation generation failed: {str(e)}")
+
+@app.get("/pronunciation/{vocab_entry_id}", response_model=VocabPronunciation, tags=["Pronunciation"])
+async def get_pronunciations(
+    vocab_entry_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Get pronunciations for a vocabulary entry"""
+    try:
+        pronunciations = await pronunciation_service.get_pronunciations(vocab_entry_id)
+        if not pronunciations:
+            raise HTTPException(status_code=404, detail="Pronunciations not found")
+        return pronunciations
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get pronunciations: {str(e)}")
+
+@app.post("/pronunciation/ensure/{vocab_entry_id}", tags=["Pronunciation"])
+async def ensure_pronunciations(
+    vocab_entry_id: str,
+    current_user: str = Depends(get_current_user),
+    versions: List[PronunciationType] = [PronunciationType.NORMAL, PronunciationType.SLOW]
+):
+    """Ensure that required pronunciation versions exist for a vocabulary entry"""
+    try:
+        success = await pronunciation_service.ensure_pronunciations_exist(
+            vocab_entry_id=vocab_entry_id,
+            user_id=current_user,
+            required_versions=versions
+        )
+        
+        return {
+            "success": success,
+            "message": "Pronunciations ensured" if success else "Failed to ensure pronunciations",
+            "vocab_entry_id": vocab_entry_id,
+            "required_versions": [v.value for v in versions]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to ensure pronunciations: {str(e)}")
+
+@app.post("/pronunciation/batch", tags=["Pronunciation"])
+async def generate_pronunciations_batch(
+    vocab_entry_ids: List[str],
+    current_user: str = Depends(get_current_user),
+    versions: List[PronunciationType] = [PronunciationType.NORMAL, PronunciationType.SLOW]
+):
+    """Generate pronunciations for multiple vocabulary entries"""
+    try:
+        results = await pronunciation_service.generate_pronunciations_for_batch(
+            vocab_entry_ids=vocab_entry_ids,
+            user_id=current_user,
+            versions=versions
+        )
+        
+        return {
+            "success": True,
+            "message": f"Processed {len(vocab_entry_ids)} vocabulary entries",
+            "results": results,
+            "total_processed": len(vocab_entry_ids),
+            "successful": sum(1 for r in results.values() if r.success),
+            "failed": sum(1 for r in results.values() if not r.success)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Batch pronunciation generation failed: {str(e)}")
+
+@app.delete("/pronunciation/{vocab_entry_id}", tags=["Pronunciation"])
+async def delete_pronunciations(
+    vocab_entry_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Delete pronunciations for a vocabulary entry"""
+    try:
+        success = await pronunciation_service.delete_pronunciations(vocab_entry_id)
+        
+        return {
+            "success": success,
+            "message": "Pronunciations deleted successfully" if success else "Failed to delete pronunciations",
+            "vocab_entry_id": vocab_entry_id
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete pronunciations: {str(e)}")
 
 # =========== Main Application ===========
 
