@@ -26,6 +26,8 @@ from topics import get_categories, get_topics_by_category, get_topic_list
 from supabase_database import SupabaseVocabDatabase
 from tts_service import TTSService
 from pronunciation_service import pronunciation_service
+from voice_cloning_api import router as voice_cloning_router
+from tts_api import router as tts_router
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -48,6 +50,10 @@ app.add_middleware(
 # Initialize database and services
 db = SupabaseVocabDatabase()
 tts_service = TTSService()
+
+# Include voice cloning router
+app.include_router(voice_cloning_router)
+app.include_router(tts_router)
 
 # In-memory session storage (in production, use Redis or database)
 active_sessions = {}

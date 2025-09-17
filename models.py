@@ -399,6 +399,7 @@ class TTSRequest(BaseModel):
     text: str
     vocab_entry_id: Optional[str] = None
     voice_id: Optional[str] = None  # If None, use user's default voice
+    provider: Optional[VoiceProvider] = None  # If None, auto-select based on subscription
     language: str = "en-US"
     speed: float = 1.0  # 0.25 to 4.0
     pitch: float = 0.0  # -20.0 to 20.0
@@ -413,6 +414,10 @@ class TTSResponse(BaseModel):
     duration_seconds: Optional[float] = None
     provider: Optional[VoiceProvider] = None
     voice_id: Optional[str] = None
+    
+    class Config:
+        # Exclude audio_data from JSON serialization to avoid Unicode errors
+        exclude = {"audio_data"}
 
 class VoiceCloneRequest(BaseModel):
     """Request to create a voice clone"""
