@@ -45,9 +45,10 @@ urllib3==2.5.0
 uvicorn==0.35.0
 xxhash==3.5.0
 zstandard==0.23.0
+python-multipart==0.0.12
 # TTS Dependencies
 google-cloud-texttospeech==2.16.3
-elevenlabs==0.2.26
+elevenlabs==2.15.0
 pydub==0.25.1
 librosa==0.10.1
 soundfile==0.12.1

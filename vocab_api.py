@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import uuid
 import hashlib
 import secrets
+import os
 
 # Import your existing modules
 from vocab_agent import run_single_topic_generation, run_continuous_vocab_generation, view_saved_topic_lists
@@ -27,7 +28,7 @@ from supabase_database import SupabaseVocabDatabase
 from tts_service import TTSService
 from pronunciation_service import pronunciation_service
 from voice_cloning_api import router as voice_cloning_router
-from tts_api import router as tts_router
+# from tts_api import router as tts_router  # Commented out due to path conflict
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -53,142 +54,99 @@ tts_service = TTSService()
 
 # Include voice cloning router
 app.include_router(voice_cloning_router)
-app.include_router(tts_router)
+# app.include_router(tts_router)  # Commented out due to path conflict
 
 # In-memory session storage (in production, use Redis or database)
 active_sessions = {}
 
 # =========== AUTHENTICATION HELPER ===========
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+# Auth endpoints removed - use main auth server on port 8000
+# /auth/login, /auth/register, /auth/logout are handled by the main server
 
-@app.post("/auth/login", tags=["Authentication"])
-async def login(request: LoginRequest):
-    """Secure login endpoint with session management"""
-    
-    # SECURITY: Only accept specific credentials
-    if request.username == "Tan" and request.password == "Khanh123:)":
-        # Use the actual user ID from the database
-        user_id = "206a458c-c01a-4f20-aec3-08107df8c515"
-        
-        print(f"Using user ID: {user_id}")
-        
-        # Create user profile if it doesn't exist
-        await ensure_user_exists(user_id, request.username)
-        
-        # SECURITY FIX: Create a secure session token
-        session_token = secrets.token_urlsafe(32)
-        session_expiry = datetime.now() + timedelta(hours=24)  # 24 hour expiry
-        
-        # Store session in memory (in production, use Redis or database)
-        active_sessions[session_token] = {
-            "user_id": user_id,
-            "username": request.username,
-            "created_at": datetime.now(),
-            "expires_at": session_expiry
-        }
-        
-        return {
-            "success": True,
-            "message": "Login successful",
-            "user_id": user_id,
-            "username": request.username,
-            "session_token": session_token,
-            "expires_at": session_expiry.isoformat()
-        }
-    else:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
 
-@app.post("/auth/logout", tags=["Authentication"])
-async def logout(authorization: Optional[str] = Header(None)):
-    """Logout and invalidate session"""
+
+async def get_current_user(authorization: Optional[str] = Header(None)) -> str:
+    """Extract and validate user from Supabase Auth token"""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header required")
     
     try:
         # Extract token
         if authorization.startswith("Bearer "):
-            token = authorization[7:]
+            token = authorization[7:]  # Remove "Bearer " prefix
         else:
             token = authorization
         
-        # Remove session if it exists
-        if token in active_sessions:
-            del active_sessions[token]
-            return {
-                "success": True,
-                "message": "Logged out successfully"
-            }
-        else:
-            return {
-                "success": True,
-                "message": "Session not found (already logged out)"
-            }
+        # Validate token directly with Supabase
+        user_response = db.client.auth.get_user(token)
+        
+        if not user_response or not user_response.user:
+            raise HTTPException(status_code=401, detail="Invalid Supabase Auth token")
+        
+        user = user_response.user
+        user_id = user.id
+        
+        # Ensure user exists in vocab database
+        await ensure_user_exists(user_id, user.email)
+        
+        return user_id
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Logout failed: {str(e)}")
+        raise HTTPException(status_code=401, detail=f"Authentication verification failed: {str(e)}")
 
-async def get_current_user(authorization: Optional[str] = Header(None)) -> str:
-    """Extract and validate user from session token or user ID (backward compatibility)"""
+async def get_current_user_and_client(authorization: Optional[str] = Header(None)) -> tuple[str, any]:
+    """Extract and validate user from Supabase Auth token, return user_id and authenticated client"""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header required")
     
     try:
-        # Check if it's a session token (new secure method)
+        # Extract token
         if authorization.startswith("Bearer "):
             token = authorization[7:]  # Remove "Bearer " prefix
         else:
             token = authorization
         
-        # First, try to validate as session token
-        if token in active_sessions:
-            session = active_sessions[token]
-            # Check if session is expired
-            if datetime.now() > session["expires_at"]:
-                # Remove expired session
-                del active_sessions[token]
-                raise HTTPException(status_code=401, detail="Session expired")
-            
-            # Session is valid, return user ID
-            return session["user_id"]
+        # Validate token directly with Supabase
+        user_response = db.client.auth.get_user(token)
         
-        # Backward compatibility: Check if it's a valid UUID (old method)
-        import uuid
-        try:
-            uuid.UUID(token)
-            # This is a user ID, check if user exists
-            result = db.client.table("profiles").select("id").eq("id", token).execute()
-            if not result.data:
-                raise HTTPException(status_code=401, detail="User not found or not authenticated")
-            return token
-        except ValueError:
-            # Not a valid UUID, must be an invalid token
-            raise HTTPException(status_code=401, detail="Invalid session token or user ID")
+        if not user_response or not user_response.user:
+            raise HTTPException(status_code=401, detail="Invalid Supabase Auth token")
+        
+        user = user_response.user
+        user_id = user.id
+        
+        # Ensure user exists in vocab database
+        await ensure_user_exists(user_id, user.email)
+        
+        # Return user_id and None for authenticated_client (not needed for current setup)
+        return user_id, None
         
     except HTTPException:
         raise
-    except Exception:
-        raise HTTPException(status_code=401, detail="Authentication verification failed")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication verification failed: {str(e)}")
 
-async def ensure_user_exists(user_id: str, username: str = None) -> bool:
+async def ensure_user_exists(user_id: str, email: str = None) -> bool:
     """Ensure user exists in the profiles table, create if necessary"""
     try:
         # Check if user exists
         result = db.client.table("profiles").select("id").eq("id", user_id).execute()
         
         if not result.data:
-            # User doesn't exist, create them
+            # User doesn't exist, create basic profile
             user_data = {
                 "id": user_id,
-                "email": f"{username or 'user'}@example.com" if username else f"user-{user_id}@example.com",
+                "email": email or f"user_{user_id}@example.com",
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat()
             }
             
-            # Add username if provided
-            if username:
-                user_data["username"] = username
+            # Add username from email if available
+            if email:
+                user_data["user_name"] = email.split("@")[0]
             
             db.client.table("profiles").insert(user_data).execute()
             print(f"Created user profile for {user_id}")
@@ -707,22 +665,45 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
         filtered_entries = filter_duplicates(relevant_entries, existing_combinations)
         
         # Save new vocabulary entries to vocab_entries table (but not to user's personal lists)
+        inserted_result = None
         if filtered_entries:
-            db.insert_vocab_entries(
+            inserted_result = db.insert_vocab_entries(
                 entries=filtered_entries,
                 topic_name=topic,
                 category_name=None,  # Will be determined by topic
                 target_language=language_to_learn,
                 original_language=learners_native_language
             )
-            print(f"Saved {len(filtered_entries)} new vocabulary entries to database")
+            print(f"Saved {inserted_result['inserted_count']} new vocabulary entries to database")
         
-        # Create response entries with duplicate flags and include all necessary info
+        # Create response entries with actual database IDs and duplicate flags
         response_entries = []
+        inserted_entries_map = {}
+        
+        # Create a map of inserted entries by word for quick lookup
+        if inserted_result and inserted_result['inserted_entries']:
+            for item in inserted_result['inserted_entries']:
+                inserted_entries_map[item['entry'].word] = item['id']
+        
+        # Get existing entries from database for duplicates
+        existing_entries_map = {}
+        if relevant_entries:  # If we have entries to process, get existing entries from database
+            existing_entries = db.get_vocab_entries(topic_name=topic, limit=1000)
+            for existing_entry in existing_entries:
+                existing_entries_map[existing_entry['word'].lower()] = existing_entry['id']
+        
         for entry in relevant_entries:
             is_duplicate = entry not in filtered_entries
+            # Use actual database ID if available (new or existing), otherwise generate a UUID
+            if entry.word in inserted_entries_map:
+                entry_id = inserted_entries_map[entry.word]
+            elif is_duplicate and entry.word.lower() in existing_entries_map:
+                entry_id = existing_entries_map[entry.word.lower()]
+            else:
+                entry_id = str(uuid.uuid4())
+            
             response_entries.append(VocabEntryResponse(
-                id=str(uuid.uuid4()),  # Generate unique ID for frontend
+                id=entry_id,  # Use actual database ID
                 word=entry.word,
                 definition=entry.definition,
                 translation=entry.translation,  # Include translation
@@ -815,11 +796,34 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
             # Filter out duplicates for database storage only
             filtered_entries = filter_duplicates(relevant_entries, existing_combinations)
             
+            # Save new vocabulary entries to vocab_entries table (but not to user's personal lists)
+            inserted_result = None
+            if filtered_entries:
+                inserted_result = db.insert_vocab_entries(
+                    entries=filtered_entries,
+                    topic_name=topic,
+                    category_name=None,  # Will be determined by topic
+                    target_language=language_to_learn,
+                    original_language=learners_native_language
+                )
+                print(f"Saved {inserted_result['inserted_count']} new vocabulary entries to database")
+            
+            # Create response entries with actual database IDs and duplicate flags
+            inserted_entries_map = {}
+            
+            # Create a map of inserted entries by word for quick lookup
+            if inserted_result and inserted_result['inserted_entries']:
+                for item in inserted_result['inserted_entries']:
+                    inserted_entries_map[item['entry'].word] = item['id']
+            
             # Create response entries with duplicate flags
             for entry in relevant_entries:
                 is_duplicate = entry not in filtered_entries
+                # Use actual database ID if available, otherwise generate a UUID
+                entry_id = inserted_entries_map.get(entry.word, str(uuid.uuid4()))
+                
                 all_response_entries.append(VocabEntryResponse(
-                    id=str(uuid.uuid4()),  # Generate unique ID for frontend
+                    id=entry_id,  # Use actual database ID
                     word=entry.word,
                     definition=entry.definition,
                     translation=entry.translation,  # Include translation
@@ -2115,11 +2119,12 @@ async def validate_cache_quality(sample_size: int = 100):
 @app.post("/tts/generate", response_model=TTSResponse, tags=["TTS"])
 async def generate_tts(
     request: TTSRequest,
-    current_user: str = Depends(get_current_user)
+    auth_data: tuple = Depends(get_current_user_and_client)
 ):
     """Generate TTS audio for vocabulary or custom text"""
     try:
-        response = await tts_service.generate_tts(request, current_user)
+        current_user, authenticated_client = auth_data
+        response = await tts_service.generate_tts(request, current_user, authenticated_client)
         return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
@@ -2261,9 +2266,9 @@ async def delete_voice_profile(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete voice profile: {str(e)}")
 
-# =========== PRONUNCIATION ENDPOINTS ===========
+# =========== TTS PRONUNCIATION ENDPOINTS ===========
 
-@app.post("/pronunciation/generate", response_model=PronunciationResponse, tags=["Pronunciation"])
+@app.post("/tts/pronunciation/generate", response_model=PronunciationResponse, tags=["TTS"])
 async def generate_pronunciations(
     request: PronunciationRequest,
     current_user: str = Depends(get_current_user)
@@ -2275,7 +2280,7 @@ async def generate_pronunciations(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pronunciation generation failed: {str(e)}")
 
-@app.get("/pronunciation/{vocab_entry_id}", response_model=VocabPronunciation, tags=["Pronunciation"])
+@app.get("/tts/pronunciation/{vocab_entry_id}", response_model=VocabPronunciation, tags=["TTS"])
 async def get_pronunciations(
     vocab_entry_id: str,
     current_user: str = Depends(get_current_user)
@@ -2291,7 +2296,7 @@ async def get_pronunciations(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get pronunciations: {str(e)}")
 
-@app.post("/pronunciation/ensure/{vocab_entry_id}", tags=["Pronunciation"])
+@app.post("/tts/pronunciation/ensure/{vocab_entry_id}", tags=["TTS"])
 async def ensure_pronunciations(
     vocab_entry_id: str,
     current_user: str = Depends(get_current_user),
@@ -2315,7 +2320,7 @@ async def ensure_pronunciations(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to ensure pronunciations: {str(e)}")
 
-@app.post("/pronunciation/batch", tags=["Pronunciation"])
+@app.post("/tts/pronunciation/batch", tags=["TTS"])
 async def generate_pronunciations_batch(
     vocab_entry_ids: List[str],
     current_user: str = Depends(get_current_user),
@@ -2341,7 +2346,7 @@ async def generate_pronunciations_batch(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Batch pronunciation generation failed: {str(e)}")
 
-@app.delete("/pronunciation/{vocab_entry_id}", tags=["Pronunciation"])
+@app.delete("/tts/pronunciation/{vocab_entry_id}", tags=["TTS"])
 async def delete_pronunciations(
     vocab_entry_id: str,
     current_user: str = Depends(get_current_user)

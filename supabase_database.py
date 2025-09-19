@@ -117,6 +117,7 @@ class SupabaseVocabDatabase:
         """Insert multiple vocab entries into Supabase, skipping duplicates"""
         inserted_count = 0
         skipped_count = 0
+        inserted_entries = []  # Store inserted entries with their IDs
         
         # Enforce that every vocab must be linked to a topic
         if not topic_name:
@@ -149,6 +150,13 @@ class SupabaseVocabDatabase:
                 
                 if result.data:
                     inserted_count += 1
+                    # Store the entry with its database ID
+                    inserted_entry = result.data[0]
+                    inserted_entries.append({
+                        "entry": entry,
+                        "id": inserted_entry["id"],
+                        "database_data": inserted_entry
+                    })
                 else:
                     skipped_count += 1
                     
@@ -162,6 +170,11 @@ class SupabaseVocabDatabase:
                     raise
         
         print(f"Inserted {inserted_count} new vocab entries, skipped {skipped_count} duplicates")
+        return {
+            "inserted_count": inserted_count,
+            "skipped_count": skipped_count,
+            "inserted_entries": inserted_entries
+        }
     
     def get_vocab_entries(self, topic_name: str = None, category_name: str = None, 
                          level: CEFRLevel = None, limit: int = 100) -> List[Dict[str, Any]]:

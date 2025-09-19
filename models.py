@@ -473,11 +473,13 @@ class PronunciationVersion(BaseModel):
     provider: VoiceProvider
     voice_id: Optional[str] = None
     speed: float = 1.0
+    duration_seconds: Optional[float] = None
     created_at: Optional[datetime] = None
 
 class VocabPronunciation(BaseModel):
     """Complete pronunciation data for a vocabulary entry"""
     vocab_entry_id: str
+    user_id: str
     word: str
     versions: Dict[PronunciationType, PronunciationVersion]
     status: str = "pending"  # pending, generating, completed, failed

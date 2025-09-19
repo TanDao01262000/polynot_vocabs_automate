@@ -87,6 +87,7 @@ class PronunciationService:
             # Create or update pronunciation record
             vocab_pronunciation = VocabPronunciation(
                 vocab_entry_id=request.vocab_entry_id,
+                user_id=user_id,
                 word=vocab_entry["word"],
                 versions=pronunciation_versions,
                 status="completed" if pronunciation_versions else "failed",
@@ -145,6 +146,7 @@ class PronunciationService:
                 provider=tts_response.provider,
                 voice_id=tts_response.voice_id,
                 speed=settings["speed"],
+                duration_seconds=tts_response.duration_seconds,
                 created_at=datetime.now()
             )
             
@@ -157,7 +159,9 @@ class PronunciationService:
     async def _get_vocab_entry(self, vocab_entry_id: str) -> Optional[Dict]:
         """Get vocabulary entry from database"""
         try:
-            result = self.db.client.table("vocab_entries").select("*").eq("id", vocab_entry_id).execute()
+            # Use service role database if available to bypass RLS policies
+            db_client = self.service_db if self.service_db else self.db.client
+            result = db_client.table("vocab_entries").select("*").eq("id", vocab_entry_id).execute()
             return result.data[0] if result.data else None
         except Exception as e:
             print(f"Error getting vocab entry: {e}")
@@ -167,27 +171,30 @@ class PronunciationService:
         """Get existing pronunciations for a vocabulary entry"""
         try:
             # Use service role database if available
-            db_client = self.service_db.client if self.service_db else self.db.client
-            result = db_client.table("vocab_pronunciations").select("*").eq("vocab_entry_id", vocab_entry_id).execute()
+            db_client = self.service_db if self.service_db else self.db.client
+            result = db_client.table("vocab_pronunciation_versions").select("*").eq("vocab_entry_id", vocab_entry_id).execute()
             
             if not result.data:
                 return {}
             
-            pronunciation_data = result.data[0]
             versions = {}
             
-            # Parse versions from JSON
-            if pronunciation_data.get("versions"):
-                for version_type_str, version_data in pronunciation_data["versions"].items():
-                    version_type = PronunciationType(version_type_str)
+            # Parse individual version records
+            for version_data in result.data:
+                try:
+                    version_type = PronunciationType(version_data["pronunciation_type"])
                     versions[version_type] = PronunciationVersion(
                         type=version_type,
                         audio_url=version_data["audio_url"],
                         provider=VoiceProvider(version_data["provider"]),
                         voice_id=version_data.get("voice_id"),
                         speed=version_data.get("speed", 1.0),
+                        duration_seconds=version_data.get("duration_seconds"),
                         created_at=datetime.fromisoformat(version_data["created_at"]) if version_data.get("created_at") else None
                     )
+                except (ValueError, KeyError) as e:
+                    print(f"Error parsing pronunciation version: {e}")
+                    continue
             
             return versions
             
@@ -198,38 +205,34 @@ class PronunciationService:
     async def _save_pronunciations(self, vocab_pronunciation: VocabPronunciation):
         """Save pronunciations to database"""
         try:
-            # Convert versions to JSON format
-            versions_json = {}
+            # Use service role database if available
+            db_client = self.service_db if self.service_db else self.db.client
+            
+            # Save each version as a separate record in vocab_pronunciation_versions
             for version_type, version in vocab_pronunciation.versions.items():
-                versions_json[version_type.value] = {
-                    "audio_url": version.audio_url,
+                version_data = {
+                    "vocab_entry_id": vocab_pronunciation.vocab_entry_id,
+                    "user_id": vocab_pronunciation.user_id,
+                    "pronunciation_type": version_type.value,
                     "provider": version.provider.value,
                     "voice_id": version.voice_id,
                     "speed": version.speed,
-                    "created_at": version.created_at.isoformat() if version.created_at else None
+                    "language": "en",  # Default language
+                    "audio_url": version.audio_url,
+                    "duration_seconds": version.duration_seconds,
+                    "created_at": version.created_at.isoformat() if version.created_at else None,
+                    "updated_at": version.created_at.isoformat() if version.created_at else None
                 }
-            
-            # Prepare data for database
-            pronunciation_data = {
-                "vocab_entry_id": vocab_pronunciation.vocab_entry_id,
-                "word": vocab_pronunciation.word,
-                "versions": versions_json,
-                "status": vocab_pronunciation.status,
-                "created_at": vocab_pronunciation.created_at.isoformat() if vocab_pronunciation.created_at else None,
-                "updated_at": vocab_pronunciation.updated_at.isoformat() if vocab_pronunciation.updated_at else None
-            }
-            
-            # Check if record exists
-            # Use service role database if available
-            db_client = self.service_db.client if self.service_db else self.db.client
-            existing = db_client.table("vocab_pronunciations").select("id").eq("vocab_entry_id", vocab_pronunciation.vocab_entry_id).execute()
-            
-            if existing.data:
-                # Update existing record
-                db_client.table("vocab_pronunciations").update(pronunciation_data).eq("vocab_entry_id", vocab_pronunciation.vocab_entry_id).execute()
-            else:
-                # Insert new record
-                db_client.table("vocab_pronunciations").insert(pronunciation_data).execute()
+                
+                # Check if this specific version already exists
+                existing = db_client.table("vocab_pronunciation_versions").select("id").eq("vocab_entry_id", vocab_pronunciation.vocab_entry_id).eq("pronunciation_type", version_type.value).execute()
+                
+                if existing.data:
+                    # Update existing version
+                    db_client.table("vocab_pronunciation_versions").update(version_data).eq("id", existing.data[0]["id"]).execute()
+                else:
+                    # Insert new version
+                    db_client.table("vocab_pronunciation_versions").insert(version_data).execute()
                 
         except Exception as e:
             print(f"Error saving pronunciations: {e}")
@@ -238,35 +241,54 @@ class PronunciationService:
         """Get pronunciations for a vocabulary entry"""
         try:
             # Use service role database if available
-            db_client = self.service_db.client if self.service_db else self.db.client
-            result = db_client.table("vocab_pronunciations").select("*").eq("vocab_entry_id", vocab_entry_id).execute()
+            db_client = self.service_db if self.service_db else self.db.client
+            result = db_client.table("vocab_pronunciation_versions").select("*").eq("vocab_entry_id", vocab_entry_id).execute()
             
             if not result.data:
                 return None
             
-            pronunciation_data = result.data[0]
-            
-            # Parse versions
+            # Parse individual version records
             versions = {}
-            if pronunciation_data.get("versions"):
-                for version_type_str, version_data in pronunciation_data["versions"].items():
-                    version_type = PronunciationType(version_type_str)
+            user_id = None
+            word = None
+            
+            for version_data in result.data:
+                try:
+                    version_type = PronunciationType(version_data["pronunciation_type"])
                     versions[version_type] = PronunciationVersion(
                         type=version_type,
                         audio_url=version_data["audio_url"],
                         provider=VoiceProvider(version_data["provider"]),
                         voice_id=version_data.get("voice_id"),
                         speed=version_data.get("speed", 1.0),
+                        duration_seconds=version_data.get("duration_seconds"),
                         created_at=datetime.fromisoformat(version_data["created_at"]) if version_data.get("created_at") else None
                     )
+                    
+                    # Get user_id and word from first record
+                    if user_id is None:
+                        user_id = version_data.get("user_id")
+                    if word is None:
+                        # Get word from vocab_entries table
+                        vocab_result = db_client.table("vocab_entries").select("word").eq("id", vocab_entry_id).execute()
+                        if vocab_result.data:
+                            word = vocab_result.data[0]["word"]
+                            
+                except (ValueError, KeyError) as e:
+                    print(f"Error parsing pronunciation version: {e}")
+                    continue
+            
+            if not versions:
+                return None
             
             return VocabPronunciation(
-                vocab_entry_id=pronunciation_data["vocab_entry_id"],
-                word=pronunciation_data["word"],
+                vocab_entry_id=vocab_entry_id,
+                user_id=user_id or "unknown",
+                word=word or "unknown",
                 versions=versions,
-                status=pronunciation_data["status"],
-                created_at=datetime.fromisoformat(pronunciation_data["created_at"]) if pronunciation_data.get("created_at") else None,
-                updated_at=datetime.fromisoformat(pronunciation_data["updated_at"]) if pronunciation_data.get("updated_at") else None
+                status="completed",  # Default status since we have versions
+                created_at=datetime.now(),
+                updated_at=datetime.now()
             )
             
         except Exception as e:
@@ -277,8 +299,8 @@ class PronunciationService:
         """Delete pronunciations for a vocabulary entry"""
         try:
             # Use service role database if available
-            db_client = self.service_db.client if self.service_db else self.db.client
-            db_client.table("vocab_pronunciations").delete().eq("vocab_entry_id", vocab_entry_id).execute()
+            db_client = self.service_db if self.service_db else self.db.client
+            db_client.table("vocab_pronunciation_versions").delete().eq("vocab_entry_id", vocab_entry_id).execute()
             return True
         except Exception as e:
             print(f"Error deleting pronunciations: {e}")

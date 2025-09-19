@@ -39,18 +39,21 @@ class VoiceCloningService:
             self._elevenlabs_client = None
     
     def _init_service_role_db(self):
-        """Initialize service role database client for privileged operations"""
+        """Initialize service role database for backend operations"""
+        # PRODUCTION ARCHITECTURE: Use service role key for backend operations
+        # - Frontend: Anon key + RLS for user operations
+        # - Backend: Service role key for system operations (voice cloning, file storage, etc.)
         try:
             from supabase import create_client
             if Config.SUPABASE_SERVICE_ROLE_KEY:
                 self.service_db = create_client(Config.SUPABASE_URL, Config.SUPABASE_SERVICE_ROLE_KEY)
-                print("✅ Service role database client initialized")
+                print("✅ Service role database initialized for backend operations")
             else:
-                print("⚠️ Service role key not found, using regular client")
-                self.service_db = self.db
+                print("⚠️ Service role key not found, backend operations may fail")
+                self.service_db = None
         except Exception as e:
             print(f"❌ Failed to initialize service role database: {e}")
-            self.service_db = self.db
+            self.service_db = None
     
     @property
     def is_configured(self) -> bool:
@@ -149,12 +152,12 @@ class VoiceCloningService:
                         voice_profile=None
                     )
             
-                    # Step 3: Create voice clone using ElevenLabs API with temp files
-                    print(f"🎭 Step 3: Creating voice clone with ElevenLabs...")
-                    voice = self._elevenlabs_client.voices.clone(
-                        name=voice_name,
-                        files=temp_files  # Use temp files for ElevenLabs
-                    )
+            # Step 3: Create voice clone using ElevenLabs API with temp files
+            print(f"🎭 Step 3: Creating voice clone with ElevenLabs...")
+            voice = self._elevenlabs_client.voices.clone(
+                name=voice_name,
+                files=temp_files  # Use temp files for ElevenLabs
+            )
             
             # Clean up temporary files
             for temp_file in temp_files:
@@ -167,7 +170,7 @@ class VoiceCloningService:
             print(f"👤 Step 4: Ensuring user exists in profiles table...")
             try:
                 # Check if user exists
-                user_check = self.service_db.table('profiles').select('id').eq('id', user_id).execute()
+                user_check = self.db.client.table('profiles').select('id').eq('id', user_id).execute()
                 if not user_check.data:
                     # Create user profile
                     user_profile = {
@@ -176,7 +179,11 @@ class VoiceCloningService:
                         'created_at': datetime.now().isoformat(),
                         'updated_at': datetime.now().isoformat()
                     }
-                    self.service_db.table('profiles').insert(user_profile).execute()
+                    # PRODUCTION: Use service role key for backend operations
+                    if self.service_db:
+                        self.service_db.table('profiles').insert(user_profile).execute()
+                    else:
+                        self.db.client.table('profiles').insert(user_profile).execute()
                     print(f"   ✅ Created user profile for {user_id}")
                 else:
                     print(f"   ✅ User profile already exists")
@@ -199,9 +206,15 @@ class VoiceCloningService:
             profile_data = voice_profile.dict()
             profile_data.pop('id', None)  # Remove id to let database generate it
             
-            result = self.service_db.table('user_voice_profiles').insert(
-                profile_data
-            ).execute()
+            # PRODUCTION: Use service role key for backend operations
+            if self.service_db:
+                result = self.service_db.table('user_voice_profiles').insert(
+                    profile_data
+                ).execute()
+            else:
+                result = self.db.client.table('user_voice_profiles').insert(
+                    profile_data
+                ).execute()
             
             if result.data:
                 print(f"   ✅ Voice profile saved to database")
@@ -232,7 +245,7 @@ class VoiceCloningService:
     async def get_user_voice_profiles(self, user_id: str) -> List[UserVoiceProfile]:
         """Get all voice profiles for a user"""
         try:
-            result = self.service_db.table('user_voice_profiles').select('*').eq(
+            result = self.db.client.table('user_voice_profiles').select('*').eq(
                 'user_id', user_id
             ).eq('is_active', True).execute()
             
@@ -247,7 +260,7 @@ class VoiceCloningService:
     async def delete_voice_profile(self, user_id: str, voice_id: str) -> bool:
         """Delete a voice profile"""
         try:
-            result = self.service_db.table('user_voice_profiles').update(
+            result = self.db.client.table('user_voice_profiles').update(
                 {'is_active': False}
             ).eq('user_id', user_id).eq('voice_id', voice_id).execute()
             

@@ -50,21 +50,24 @@ class TTSService:
         self._init_elevenlabs()
     
     def _init_service_role_db(self):
-        """Initialize service role database for TTS operations"""
+        """Initialize service role database for backend operations"""
+        # PRODUCTION ARCHITECTURE: Use service role key for backend operations
+        # - Frontend: Anon key + RLS for user operations
+        # - Backend: Service role key for system operations (TTS generation, file storage, etc.)
         try:
             if Config.SUPABASE_SERVICE_ROLE_KEY:
                 from supabase import create_client
                 service_client = create_client(Config.SUPABASE_URL, Config.SUPABASE_SERVICE_ROLE_KEY)
                 
-                # Use the client directly
+                # Use service role for backend operations (TTS generation, file storage, usage tracking)
                 self.service_db = service_client
-                print("Service role database initialized for TTS operations")
+                print("✅ Service role database initialized for backend operations")
             else:
                 self.service_db = None
-                print("Service role key not found, using regular database")
+                print("⚠️ Service role key not found, backend operations may fail")
         except Exception as e:
             self.service_db = None
-            print(f"Failed to initialize service role database: {e}")
+            print(f"❌ Failed to initialize service role database: {e}")
     
     def _init_google_tts(self):
         """Initialize Google TTS client"""
@@ -101,7 +104,8 @@ class TTSService:
     async def get_user_subscription(self, user_id: str) -> UserSubscription:
         """Get user's subscription information"""
         try:
-            result = self.service_db.table("user_subscriptions").select("*").eq("user_id", user_id).execute()
+            # Use regular database client (respects RLS) instead of service role
+            result = self.db.client.table("user_subscriptions").select("*").eq("user_id", user_id).execute()
             
             if result.data:
                 data = result.data[0]
@@ -141,13 +145,14 @@ class TTSService:
             )
     
     async def check_tts_quota(self, user_id: str) -> bool:
-        """Check if user has remaining TTS quota"""
+        """Check if user has remaining TTS quota using anon key with RLS"""
         try:
             subscription = await self.get_user_subscription(user_id)
             
-            # Get today's usage
+            # PRODUCTION: Use anon key with RLS for user data operations
+            # This ensures users can only access their own usage data
             today = datetime.now().date()
-            result = self.service_db.table("tts_usage").select("*").eq("user_id", user_id).eq("date", today.isoformat()).execute()
+            result = self.db.client.table("tts_usage").select("*").eq("user_id", user_id).eq("date", today.isoformat()).execute()
             
             usage_count = len(result.data) if result.data else 0
             
@@ -161,8 +166,8 @@ class TTSService:
             print(f"Error checking TTS quota: {e}")
             return False
     
-    async def record_tts_usage(self, user_id: str, provider: VoiceProvider, text_length: int):
-        """Record TTS usage for quota tracking"""
+    async def record_tts_usage(self, user_id: str, provider: VoiceProvider, text_length: int, authenticated_client=None):
+        """Record TTS usage for quota tracking using service role key"""
         try:
             usage_data = {
                 "user_id": user_id,
@@ -172,13 +177,18 @@ class TTSService:
                 "created_at": datetime.now().isoformat()
             }
             
-            # Use service role database if available
-            db_client = self.service_db if self.service_db else self.db.client
-            db_client.table("tts_usage").insert(usage_data).execute()
+            # PRODUCTION: Use service role key for backend operations
+            # This bypasses RLS policies for legitimate system operations
+            if hasattr(self, 'service_db') and self.service_db:
+                self.service_db.table("tts_usage").insert(usage_data).execute()
+                print(f"✅ TTS usage recorded for user {user_id}")
+            else:
+                print("❌ Service role database not available for usage tracking")
+                
         except Exception as e:
             print(f"Error recording TTS usage: {e}")
     
-    async def generate_tts(self, request: TTSRequest, user_id: str) -> TTSResponse:
+    async def generate_tts(self, request: TTSRequest, user_id: str, authenticated_client=None) -> TTSResponse:
         """Generate TTS audio based on user's subscription"""
         try:
             # Check quota
@@ -194,35 +204,35 @@ class TTSService:
             # Choose provider based on subscription and request
             if subscription.plan == SubscriptionPlan.FREE:
                 # Free users: Only Google TTS
-                return await self._generate_google_tts(request, user_id)
+                return await self._generate_google_tts(request, user_id, authenticated_client)
             else:
                 # Premium users: Choice between Google TTS and ElevenLabs
                 if request.provider:
                     # User explicitly specified provider
                     if request.provider == VoiceProvider.GOOGLE_TTS:
-                        return await self._generate_google_tts(request, user_id)
+                        return await self._generate_google_tts(request, user_id, authenticated_client)
                     elif request.provider == VoiceProvider.ELEVENLABS:
                         if request.voice_id:
                             # Check if it's a custom cloned voice
                             voice_profile = await self._get_user_voice_profile(user_id, request.voice_id)
                             if voice_profile and voice_profile.status == VoiceCloneStatus.COMPLETED:
-                                return await self._generate_elevenlabs_tts(request, user_id)
-                        return await self._generate_elevenlabs_standard_tts(request, user_id)
+                                return await self._generate_elevenlabs_tts(request, user_id, authenticated_client)
+                        return await self._generate_elevenlabs_standard_tts(request, user_id, authenticated_client)
                 elif request.voice_id:
                     # No provider specified, but voice_id given - auto-detect
                     voice_profile = await self._get_user_voice_profile(user_id, request.voice_id)
                     if voice_profile and voice_profile.status == VoiceCloneStatus.COMPLETED:
                         # Use cloned voice (ElevenLabs)
-                        return await self._generate_elevenlabs_tts(request, user_id)
+                        return await self._generate_elevenlabs_tts(request, user_id, authenticated_client)
                     elif request.voice_id.startswith('google_') or request.voice_id == 'google_default':
                         # Explicitly request Google TTS
-                        return await self._generate_google_tts(request, user_id)
+                        return await self._generate_google_tts(request, user_id, authenticated_client)
                     else:
                         # Use ElevenLabs with standard voice
-                        return await self._generate_elevenlabs_standard_tts(request, user_id)
+                        return await self._generate_elevenlabs_standard_tts(request, user_id, authenticated_client)
                 else:
                     # No provider or voice_id specified - use Google TTS as default for premium users
-                    return await self._generate_google_tts(request, user_id)
+                    return await self._generate_google_tts(request, user_id, authenticated_client)
                 
         except Exception as e:
             return TTSResponse(
@@ -230,7 +240,7 @@ class TTSService:
                 message=f"TTS generation failed: {str(e)}"
             )
     
-    async def _generate_google_tts(self, request: TTSRequest, user_id: str) -> TTSResponse:
+    async def _generate_google_tts(self, request: TTSRequest, user_id: str, authenticated_client=None) -> TTSResponse:
         """Generate TTS using Google TTS REST API"""
         try:
             print(f"🔍 DEBUG: Google TTS called for text: '{request.text}'")
@@ -274,10 +284,10 @@ class TTSService:
             audio_content = base64.b64decode(result["audioContent"])
             
             # Record usage
-            await self.record_tts_usage(user_id, VoiceProvider.GOOGLE_TTS, len(request.text))
+            await self.record_tts_usage(user_id, VoiceProvider.GOOGLE_TTS, len(request.text), authenticated_client)
             
             # Save audio file and get URL
-            audio_url = await self._save_audio_file(user_id, audio_content, "google_tts", request.text)
+            audio_url = await self._save_audio_file(user_id, audio_content, "google_tts", request.text, authenticated_client)
             
             return TTSResponse(
                 success=True,
@@ -297,7 +307,7 @@ class TTSService:
                 message=f"Google TTS generation failed: {str(e)}"
             )
     
-    async def _generate_elevenlabs_tts(self, request: TTSRequest, user_id: str) -> TTSResponse:
+    async def _generate_elevenlabs_tts(self, request: TTSRequest, user_id: str, authenticated_client=None) -> TTSResponse:
         """Generate TTS using ElevenLabs"""
         try:
             if not self._elevenlabs_configured:
@@ -322,7 +332,7 @@ class TTSService:
                 use_speaker_boost=True
             )
             
-            # Generate audio using new ElevenLabs API
+            # Generate audio using ElevenLabs API
             audio_generator = self._elevenlabs_client.text_to_speech.convert(
                 text=request.text,
                 voice_id=voice_profile.voice_id,
@@ -334,10 +344,10 @@ class TTSService:
             audio = b''.join(audio_generator)
             
             # Record usage
-            await self.record_tts_usage(user_id, VoiceProvider.ELEVENLABS, len(request.text))
+            await self.record_tts_usage(user_id, VoiceProvider.ELEVENLABS, len(request.text), authenticated_client)
             
             # Save audio file and get URL
-            audio_url = await self._save_audio_file(user_id, audio, "elevenlabs", request.text)
+            audio_url = await self._save_audio_file(user_id, audio, "elevenlabs", request.text, authenticated_client)
             
             return TTSResponse(
                 success=True,
@@ -354,7 +364,7 @@ class TTSService:
                 message=f"ElevenLabs TTS generation failed: {str(e)}"
             )
     
-    async def _generate_elevenlabs_standard_tts(self, request: TTSRequest, user_id: str) -> TTSResponse:
+    async def _generate_elevenlabs_standard_tts(self, request: TTSRequest, user_id: str, authenticated_client=None) -> TTSResponse:
         """Generate TTS using ElevenLabs standard voices"""
         try:
             if not self._elevenlabs_configured:
@@ -366,7 +376,7 @@ class TTSService:
             # Use default voice if none specified
             voice_id = request.voice_id or "JBFqnCBsd6RMkjVDRZzb"  # Default ElevenLabs voice
             
-            # Generate audio using new ElevenLabs API
+            # Generate audio using ElevenLabs API
             audio_generator = self._elevenlabs_client.text_to_speech.convert(
                 text=request.text,
                 voice_id=voice_id,
@@ -378,10 +388,10 @@ class TTSService:
             audio = b''.join(audio_generator)
             
             # Record usage
-            await self.record_tts_usage(user_id, VoiceProvider.ELEVENLABS, len(request.text))
+            await self.record_tts_usage(user_id, VoiceProvider.ELEVENLABS, len(request.text), authenticated_client)
             
             # Save audio file and get URL
-            audio_url = await self._save_audio_file(user_id, audio, "elevenlabs", request.text)
+            audio_url = await self._save_audio_file(user_id, audio, "elevenlabs", request.text, authenticated_client)
             
             return TTSResponse(
                 success=True,
@@ -399,9 +409,11 @@ class TTSService:
             )
     
     async def _get_user_voice_profile(self, user_id: str, voice_id: Optional[str] = None) -> Optional[UserVoiceProfile]:
-        """Get user's voice profile"""
+        """Get user's voice profile using anon key with RLS"""
         try:
-            query = self.service_db.table("user_voice_profiles").select("*").eq("user_id", user_id).eq("is_active", True)
+            # PRODUCTION: Use anon key with RLS for user data operations
+            # This ensures users can only access their own voice profiles
+            query = self.db.client.table("user_voice_profiles").select("*").eq("user_id", user_id).eq("is_active", True)
             
             if voice_id:
                 query = query.eq("voice_id", voice_id)
@@ -429,8 +441,8 @@ class TTSService:
             print(f"Error getting user voice profile: {e}")
             return None
     
-    async def _save_audio_file(self, user_id: str, audio_data: bytes, provider: str, text: str = None) -> str:
-        """Save audio file and return URL"""
+    async def _save_audio_file(self, user_id: str, audio_data: bytes, provider: str, text: str = None, authenticated_client=None) -> str:
+        """Save audio file and return URL using service role key"""
         try:
             # Generate text hash for caching
             text_hash = audio_storage.generate_text_hash(text) if text else None
@@ -457,9 +469,13 @@ class TTSService:
                 "created_at": datetime.now().isoformat()
             }
             
-            # Use service role database if available
-            db_client = self.service_db if self.service_db else self.db.client
-            db_client.table("audio_files").insert(audio_metadata).execute()
+            # PRODUCTION: Use service role key for backend operations
+            # This bypasses RLS policies for legitimate system operations
+            if hasattr(self, 'service_db') and self.service_db:
+                self.service_db.table("audio_files").insert(audio_metadata).execute()
+                print(f"✅ Audio file metadata saved for user {user_id}")
+            else:
+                print("❌ Service role database not available for audio metadata")
             
             return storage_result["file_url"]
             
