@@ -100,15 +100,19 @@ class AudioStorageService:
         print("✅ Local storage initialized")
     
     async def save_audio_file(self, user_id: str, audio_data: bytes, provider: str, 
-                            text_hash: Optional[str] = None) -> Dict[str, Any]:
+                            text_hash: Optional[str] = None, custom_filename: Optional[str] = None) -> Dict[str, Any]:
         """Save audio file and return metadata"""
         try:
-            # Generate filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            if text_hash:
-                filename = f"tts_{user_id}_{provider}_{text_hash[:8]}_{timestamp}.mp3"
+            # Use custom filename if provided, otherwise generate one
+            if custom_filename:
+                filename = custom_filename
             else:
-                filename = f"tts_{user_id}_{provider}_{timestamp}.mp3"
+                # Generate filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                if text_hash:
+                    filename = f"tts_{user_id}_{provider}_{text_hash[:8]}_{timestamp}.mp3"
+                else:
+                    filename = f"tts_{user_id}_{provider}_{timestamp}.mp3"
             
             # Save based on storage type
             if self.storage_type == "s3":
@@ -204,7 +208,24 @@ class AudioStorageService:
     async def _save_to_supabase(self, user_id: str, audio_data: bytes, filename: str) -> Dict[str, Any]:
         """Save audio file to Supabase Storage"""
         try:
-            file_path = f"tts/{user_id}/{filename}"
+            # Use very short path to avoid Supabase key length limits (max ~100 chars)
+            file_path = f"{user_id}/{filename}"
+            
+            # Debug: Print file path and filename details
+            print(f"🔍 DEBUG: Uploading to Supabase Storage:")
+            print(f"  📁 Bucket: {self.bucket_name}")
+            print(f"  📄 File path: {file_path} (length: {len(file_path)})")
+            print(f"  📊 File size: {len(audio_data)} bytes")
+            
+            # Check if file already exists and delete it first if it does
+            try:
+                existing_files = self.supabase_client.storage.from_(self.bucket_name).list(user_id)
+                existing_filenames = [f.get('name', '') for f in existing_files if f.get('name')]
+                if filename in existing_filenames:
+                    print(f"🗑️  File exists, removing first: {filename}")
+                    self.supabase_client.storage.from_(self.bucket_name).remove([file_path])
+            except Exception as check_error:
+                print(f"⚠️  Could not check/remove existing file: {check_error}")
             
             # Upload to Supabase Storage
             result = self.supabase_client.storage.from_(self.bucket_name).upload(
@@ -215,6 +236,8 @@ class AudioStorageService:
                     "cache-control": "3600"
                 }
             )
+            
+            print(f"✅ Upload result: {result}")
             
             # Get public URL
             public_url = self.supabase_client.storage.from_(self.bucket_name).get_public_url(file_path)
@@ -229,6 +252,22 @@ class AudioStorageService:
             }
             
         except Exception as e:
+            print(f"❌ Supabase storage error: {e}")
+            print(f"❌ Error type: {type(e)}")
+            # Try to extract more specific error info if available
+            if hasattr(e, 'response'):
+                print(f"❌ Response: {e.response}")
+            if hasattr(e, 'message'):
+                print(f"❌ Message: {e.message}")
+            # For storage3.utils.StorageException, try to get more details
+            if 'StorageException' in str(type(e)):
+                print(f"❌ StorageException details: {vars(e) if hasattr(e, '__dict__') else 'No details'}")
+                try:
+                    # Try to get the actual error message from the exception
+                    error_details = str(e)
+                    print(f"❌ Full error string: {error_details}")
+                except:
+                    pass
             return {
                 "success": False,
                 "error": str(e),

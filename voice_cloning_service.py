@@ -98,15 +98,27 @@ class VoiceCloningService:
             stored_files = []
             
             for i, audio_data in enumerate(audio_files):
-                # Generate filename for storage
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"voice_clone_{user_id}_{voice_name}_{i+1}_{timestamp}.m4a"
+                # Generate very short filename for storage (Supabase has strict key length limits)
+                # Add microseconds to ensure unique timestamps
+                timestamp = datetime.now().strftime("%Y%m%d%H%M%S") + f"{datetime.now().microsecond//1000:03d}"
+                # Use only first 8 chars of voice_name and remove special characters
+                safe_voice_name = ''.join(c for c in voice_name[:8] if c.isalnum())
+                # Use last 6 chars of user_id only
+                short_user_id = user_id[-6:] if len(user_id) > 6 else user_id
+                filename = f"{short_user_id}_{safe_voice_name}_{i+1}_{timestamp}.m4a"
                 
-                # Save to Supabase Storage
+                # Add small delay to prevent rapid uploads that might cause issues
+                if i > 0:
+                    import asyncio
+                    await asyncio.sleep(0.1)  # 100ms delay between uploads
+                
+                # Save to Supabase Storage with custom filename
                 result = await self.audio_storage.save_audio_file(
-                    user_id=user_id,
+                    user_id=short_user_id,  # Use shorter user_id for path
                     audio_data=audio_data,
-                    provider="voice_clone_upload"
+                    provider="voice_clone_upload",
+                    text_hash=None,  # We'll handle filename generation above
+                    custom_filename=filename  # Use our custom filename
                 )
                 
                 if result.get("success"):
@@ -129,6 +141,8 @@ class VoiceCloningService:
             print(f"🔗 Step 2: Downloading files from Supabase Storage for ElevenLabs...")
             import tempfile
             import requests
+            from pydub import AudioSegment
+            import io
             
             temp_files = []
             for i, file_info in enumerate(stored_files):
@@ -137,13 +151,38 @@ class VoiceCloningService:
                     response = requests.get(file_info["file_url"])
                     response.raise_for_status()
                     
-                    # Create temporary file
-                    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.m4a')
-                    temp_file.write(response.content)
-                    temp_file.close()
-                    temp_files.append(temp_file.name)
+                    print(f"   🔍 Downloaded {len(response.content)} bytes for file {i+1}")
                     
-                    print(f"   ✅ Downloaded file {i+1}: {file_info['filename']}")
+                    # Convert M4A to WAV for better compatibility with ElevenLabs
+                    try:
+                        # Load audio with pydub
+                        audio_segment = AudioSegment.from_file(io.BytesIO(response.content), format="m4a")
+                        
+                        # Convert to WAV format (better compatibility)
+                        wav_io = io.BytesIO()
+                        audio_segment.export(wav_io, format="wav", parameters=["-ac", "1", "-ar", "22050"])  # Mono, 22kHz
+                        wav_data = wav_io.getvalue()
+                        
+                        # Create temporary WAV file
+                        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+                        temp_file.write(wav_data)
+                        temp_file.close()
+                        temp_files.append(temp_file.name)
+                        
+                        print(f"   ✅ Converted and saved file {i+1}: {file_info['filename']} -> WAV ({len(wav_data)} bytes)")
+                        
+                    except Exception as audio_error:
+                        print(f"   ⚠️ Audio conversion failed for file {i+1}: {audio_error}")
+                        print(f"   🔄 Trying direct M4A file...")
+                        
+                        # Fallback: Save M4A directly if conversion fails
+                        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.m4a')
+                        temp_file.write(response.content)
+                        temp_file.close()
+                        temp_files.append(temp_file.name)
+                        
+                        print(f"   ✅ Saved M4A file {i+1}: {file_info['filename']}")
+                    
                 except Exception as e:
                     print(f"   ❌ Failed to download file {i+1}: {e}")
                     return VoiceCloneResponse(
@@ -154,10 +193,83 @@ class VoiceCloningService:
             
             # Step 3: Create voice clone using ElevenLabs API with temp files
             print(f"🎭 Step 3: Creating voice clone with ElevenLabs...")
-            voice = self._elevenlabs_client.voices.clone(
-                name=voice_name,
-                files=temp_files  # Use temp files for ElevenLabs
-            )
+            
+            # Debug: Check available methods
+            print(f"🔍 DEBUG: Available voices methods: {dir(self._elevenlabs_client.voices)}")
+            
+            # Step 3: Create voice clone using ElevenLabs IVC API (Instant Voice Cloning)
+            try:
+                print("🔍 Creating voice clone with ElevenLabs IVC API...")
+                
+                # Prepare file objects for ElevenLabs API
+                # The API expects file objects or tuples with (filename, file_data, content_type)
+                file_objects = []
+                for temp_file_path in temp_files:
+                    with open(temp_file_path, 'rb') as f:
+                        file_data = f.read()
+                        # Create tuple format: (filename, file_data, content_type)
+                        file_name = f"voice_sample_{len(file_objects)+1}.wav"
+                        file_objects.append((file_name, file_data, "audio/wav"))
+                
+                print(f"   📁 Prepared {len(file_objects)} file objects for ElevenLabs")
+                
+                # Create voice clone using IVC API with correct parameters
+                voice = self._elevenlabs_client.voices.ivc.create(
+                    name=voice_name,
+                    files=file_objects,  # Use prepared file objects
+                    description=description or f"Voice clone for {voice_name}",
+                    remove_background_noise=True  # Optional: improve audio quality
+                )
+                
+                print(f"✅ Voice clone created successfully!")
+                print(f"   🆔 Voice ID: {voice.voice_id}")
+                print(f"   📝 Voice Name: {voice_name}")
+                
+            except Exception as ivc_error:
+                print(f"❌ Error with IVC API: {ivc_error}")
+                
+                # Try alternative file format - just file paths as strings
+                try:
+                    print("🔄 Retrying with file paths as strings...")
+                    voice = self._elevenlabs_client.voices.ivc.create(
+                        name=voice_name,
+                        files=temp_files,  # Use file paths directly
+                        description=description or f"Voice clone for {voice_name}",
+                        remove_background_noise=True
+                    )
+                    print(f"✅ Voice clone created successfully with file paths!")
+                    print(f"   🆔 Voice ID: {voice.voice_id}")
+                    
+                except Exception as ivc_error2:
+                    print(f"❌ Error with file paths: {ivc_error2}")
+                    
+                    # Try with file handles
+                    try:
+                        print("🔄 Retrying with open file handles...")
+                        file_handles = []
+                        for temp_file_path in temp_files:
+                            file_handles.append(open(temp_file_path, 'rb'))
+                        
+                        voice = self._elevenlabs_client.voices.ivc.create(
+                            name=voice_name,
+                            files=file_handles,
+                            description=description or f"Voice clone for {voice_name}",
+                            remove_background_noise=True
+                        )
+                        
+                        # Close file handles
+                        for fh in file_handles:
+                            fh.close()
+                            
+                        print(f"✅ Voice clone created successfully with file handles!")
+                        print(f"   🆔 Voice ID: {voice.voice_id}")
+                        
+                    except Exception as ivc_error3:
+                        print(f"❌ All IVC methods failed:")
+                        print(f"   - File objects error: {ivc_error}")
+                        print(f"   - File paths error: {ivc_error2}")
+                        print(f"   - File handles error: {ivc_error3}")
+                        raise Exception(f"Voice cloning failed after trying all methods. Last error: {ivc_error3}")
             
             # Clean up temporary files
             for temp_file in temp_files:

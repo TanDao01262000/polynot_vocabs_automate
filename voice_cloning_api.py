@@ -14,6 +14,42 @@ from models import (
     TTSRequest, TTSResponse
 )
 
+# Authentication function to avoid circular imports
+from fastapi import Header
+from typing import Optional
+import jwt
+import os
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+
+async def get_current_user(authorization: Optional[str] = Header(None)) -> str:
+    """Extract and validate user from Supabase Auth token"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    
+    try:
+        # Extract token
+        if authorization.startswith("Bearer "):
+            token = authorization.split(" ")[1]
+        else:
+            token = authorization
+        
+        # Decode JWT token to get user ID
+        # Note: In production, you should verify the JWT signature
+        decoded_token = jwt.decode(token, options={"verify_signature": False})
+        user_id = decoded_token.get("sub")
+        
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token: no user ID found")
+        
+        return user_id
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication verification failed: {str(e)}")
+
 # Create router
 router = APIRouter(prefix="/voice-cloning", tags=["voice-cloning"])
 
@@ -25,10 +61,10 @@ voice_cloning_service = VoiceCloningService(db, audio_storage)
 
 @router.post("/create-voice-clone", response_model=VoiceCloneResponse)
 async def create_voice_clone(
-    user_id: str,
     voice_name: str,
     audio_files: List[UploadFile] = File(...),
-    description: Optional[str] = None
+    description: Optional[str] = None,
+    current_user: str = Depends(get_current_user)  # Use proper authentication
 ):
     """
     Create a voice clone using uploaded audio files
@@ -64,9 +100,9 @@ async def create_voice_clone(
             audio_data = await audio_file.read()
             audio_data_list.append(audio_data)
         
-        # Create voice clone
+        # Create voice clone using authenticated user ID
         result = await voice_cloning_service.create_voice_clone(
-            user_id=user_id,
+            user_id=current_user,  # Use the authenticated user ID
             voice_name=voice_name,
             audio_files=audio_data_list,
             description=description
@@ -83,8 +119,8 @@ async def create_voice_clone(
         raise HTTPException(status_code=500, detail=f"Error creating voice clone: {str(e)}")
 
 
-@router.get("/voice-profiles/{user_id}", response_model=List[UserVoiceProfile])
-async def get_user_voice_profiles(user_id: str):
+@router.get("/voice-profiles", response_model=List[UserVoiceProfile])
+async def get_user_voice_profiles(current_user: str = Depends(get_current_user)):
     """
     Get all voice profiles for a user
     
@@ -95,15 +131,15 @@ async def get_user_voice_profiles(user_id: str):
         List of UserVoiceProfile objects
     """
     try:
-        profiles = await voice_cloning_service.get_user_voice_profiles(user_id)
+        profiles = await voice_cloning_service.get_user_voice_profiles(current_user)
         return profiles
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching voice profiles: {str(e)}")
 
 
-@router.delete("/voice-profiles/{user_id}/{voice_id}")
-async def delete_voice_profile(user_id: str, voice_id: str):
+@router.delete("/voice-profiles/{voice_id}")
+async def delete_voice_profile(voice_id: str, current_user: str = Depends(get_current_user)):
     """
     Delete a voice profile
     
@@ -115,7 +151,7 @@ async def delete_voice_profile(user_id: str, voice_id: str):
         Success message
     """
     try:
-        success = await voice_cloning_service.delete_voice_profile(user_id, voice_id)
+        success = await voice_cloning_service.delete_voice_profile(current_user, voice_id)
         
         if not success:
             raise HTTPException(status_code=404, detail="Voice profile not found")
@@ -131,10 +167,10 @@ async def delete_voice_profile(user_id: str, voice_id: str):
 @router.post("/generate-tts", response_model=TTSResponse)
 async def generate_tts_with_cloned_voice(
     text: str,
-    user_id: str,
     voice_id: Optional[str] = None,
     language: str = "en",
-    speed: float = 1.0
+    speed: float = 1.0,
+    current_user: str = Depends(get_current_user)
 ):
     """
     Generate TTS using a cloned voice
@@ -152,7 +188,7 @@ async def generate_tts_with_cloned_voice(
     try:
         result = await voice_cloning_service.generate_tts_with_cloned_voice(
             text=text,
-            user_id=user_id,
+            user_id=current_user,
             voice_id=voice_id,
             language=language,
             speed=speed

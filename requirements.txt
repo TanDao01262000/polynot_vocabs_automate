@@ -46,6 +46,7 @@ uvicorn==0.35.0
 xxhash==3.5.0
 zstandard==0.23.0
 python-multipart==0.0.12
+PyJWT==2.10.1
 # TTS Dependencies
 google-cloud-texttospeech==2.16.3
 elevenlabs==2.15.0
