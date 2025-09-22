@@ -2227,21 +2227,54 @@ async def get_user_subscription(
 async def get_tts_quota(
     current_user: str = Depends(get_current_user)
 ):
-    """Get user's TTS quota information"""
+    """Get user's TTS quota information including voice clone usage"""
     try:
         subscription = await tts_service.get_user_subscription(current_user)
         has_quota = await tts_service.check_tts_quota(current_user)
         
-        # Get today's usage
+        # Get today's TTS usage
         today = datetime.now().date()
         result = db.client.table("tts_usage").select("*").eq("user_id", current_user).eq("date", today.isoformat()).execute()
         usage_count = len(result.data) if result.data else 0
         
+        # Get voice clone usage (count of active voice profiles)
+        # Use service role client for backend operations to bypass RLS
+        try:
+            from config import Config
+            from supabase import create_client
+            
+            if Config.SUPABASE_SERVICE_ROLE_KEY:
+                service_client = create_client(Config.SUPABASE_URL, Config.SUPABASE_SERVICE_ROLE_KEY)
+                voice_profiles_result = service_client.table("user_voice_profiles").select("*").eq(
+                    "user_id", current_user
+                ).eq("is_active", True).execute()
+            else:
+                # Fallback to regular client
+                voice_profiles_result = db.client.table("user_voice_profiles").select("*").eq(
+                    "user_id", current_user
+                ).eq("is_active", True).execute()
+                
+            voice_clones_used = len(voice_profiles_result.data) if voice_profiles_result.data else 0
+        except Exception as e:
+            print(f"❌ Error querying voice profiles: {e}")
+            voice_clones_used = 0
+        
+        # Debug logging for voice clone counting
+        print(f"🔍 DEBUG: User {current_user} voice clone usage:")
+        print(f"   📊 Raw query result: {voice_profiles_result.data}")
+        print(f"   🔢 Voice clones found: {voice_clones_used}")
+        print(f"   📋 Subscription plan: {subscription.plan.value}")
+        
         # Calculate quota limits
         if subscription.plan == SubscriptionPlan.FREE:
             max_requests = Config.MAX_FREE_TTS_REQUESTS_PER_DAY
+            voice_clones_limit = Config.MAX_FREE_VOICE_CLONES
+        elif subscription.plan == SubscriptionPlan.PREMIUM:
+            max_requests = Config.MAX_PREMIUM_TTS_REQUESTS_PER_DAY
+            voice_clones_limit = Config.MAX_PREMIUM_VOICE_CLONES
         else:
             max_requests = Config.MAX_PREMIUM_TTS_REQUESTS_PER_DAY
+            voice_clones_limit = Config.MAX_PRO_VOICE_CLONES
         
         return {
             "success": True,
@@ -2250,6 +2283,9 @@ async def get_tts_quota(
             "max_requests": max_requests,
             "remaining_requests": max_requests - usage_count,
             "has_quota": has_quota,
+            "voice_clones_used": voice_clones_used,
+            "voice_clones_limit": voice_clones_limit,
+            "voice_clones_remaining": voice_clones_limit - voice_clones_used,
             "features": subscription.features
         }
         

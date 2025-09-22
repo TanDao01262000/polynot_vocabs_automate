@@ -332,6 +332,8 @@ class VoiceCloningService:
                 print(f"   ✅ Voice profile saved to database")
                 print(f"   🆔 Voice ID: {voice.voice_id}")
                 print(f"   📁 Files stored: {len(stored_files)} files")
+                print(f"   👤 User ID: {user_id}")
+                print(f"   🎯 Voice profile created and active")
                 
                 return VoiceCloneResponse(
                     success=True,

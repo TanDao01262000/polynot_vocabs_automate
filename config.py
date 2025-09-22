@@ -51,6 +51,11 @@ class Config:
     TTS_AUDIO_FORMAT = os.getenv("TTS_AUDIO_FORMAT", "mp3")
     TTS_AUDIO_QUALITY = os.getenv("TTS_AUDIO_QUALITY", "high")  # low, medium, high
     
+    # Voice Clone Limits
+    MAX_FREE_VOICE_CLONES = int(os.getenv("MAX_FREE_VOICE_CLONES", "1"))
+    MAX_PREMIUM_VOICE_CLONES = int(os.getenv("MAX_PREMIUM_VOICE_CLONES", "5"))
+    MAX_PRO_VOICE_CLONES = int(os.getenv("MAX_PRO_VOICE_CLONES", "10"))
+    
     # Audio Storage Configuration
     AUDIO_STORAGE_TYPE = os.getenv("AUDIO_STORAGE_TYPE", "local")  # local, s3, gcs, supabase
     LOCAL_AUDIO_PATH = os.getenv("LOCAL_AUDIO_PATH", "audio_files")
