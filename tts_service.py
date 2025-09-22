@@ -104,12 +104,16 @@ class TTSService:
     async def get_user_subscription(self, user_id: str) -> UserSubscription:
         """Get user's subscription information"""
         try:
-            # Use regular database client (respects RLS) instead of service role
-            result = self.db.client.table("user_subscriptions").select("*").eq("user_id", user_id).execute()
+            print(f"🔍 DEBUG: Looking up subscription for user_id: '{user_id}'")
+            # Use service role database for backend operations (bypasses RLS)
+            db_client = self.service_db if self.service_db else self.db.client
+            result = db_client.table("user_subscriptions").select("*").eq("user_id", user_id).execute()
+            print(f"🔍 DEBUG: Subscription query returned {len(result.data) if result.data else 0} results")
             
             if result.data:
                 data = result.data[0]
-                return UserSubscription(
+                print(f"🔍 DEBUG: Found subscription data: {data}")
+                subscription = UserSubscription(
                     user_id=data["user_id"],
                     plan=SubscriptionPlan(data["plan"]),
                     is_active=data["is_active"],
@@ -118,8 +122,11 @@ class TTSService:
                     updated_at=datetime.fromisoformat(data["updated_at"]) if data["updated_at"] else None,
                     features=data.get("features", {})
                 )
+                print(f"🔍 DEBUG: Parsed subscription: plan={subscription.plan}, is_active={subscription.is_active}")
+                return subscription
             else:
                 # Default to free plan
+                print(f"🔍 DEBUG: No subscription found, defaulting to FREE plan")
                 return UserSubscription(
                     user_id=user_id,
                     plan=SubscriptionPlan.FREE,
@@ -202,9 +209,31 @@ class TTSService:
             subscription = await self.get_user_subscription(user_id)
             
             # Choose provider based on subscription and request
+            print(f"🔍 DEBUG: User ID: '{user_id}'")
+            print(f"🔍 DEBUG: User subscription plan: {subscription.plan}")
+            print(f"🔍 DEBUG: Request voice_id: '{request.voice_id}'")
+            print(f"🔍 DEBUG: Request provider: {request.provider}")
+            
             if subscription.plan == SubscriptionPlan.FREE:
-                # Free users: Only Google TTS
-                return await self._generate_google_tts(request, user_id, authenticated_client)
+                # Free users: Check if they have a custom voice first
+                if request.voice_id:
+                    voice_profile = await self._get_user_voice_profile(user_id, request.voice_id)
+                    if voice_profile and voice_profile.status == VoiceCloneStatus.COMPLETED:
+                        # User has their own custom voice, allow them to use it
+                        print(f"🔍 DEBUG: FREE user using their own custom voice")
+                        return await self._generate_elevenlabs_tts(request, user_id, authenticated_client)
+                    elif request.voice_id.startswith('google_') or request.voice_id == 'google_default':
+                        # Explicitly request Google TTS
+                        print(f"🔍 DEBUG: FREE user using Google TTS (explicit request)")
+                        return await self._generate_google_tts(request, user_id, authenticated_client)
+                    else:
+                        # Try to use ElevenLabs standard voice (may fail if not premium)
+                        print(f"🔍 DEBUG: FREE user trying ElevenLabs standard voice")
+                        return await self._generate_elevenlabs_standard_tts(request, user_id, authenticated_client)
+                else:
+                    # No voice_id specified, use Google TTS
+                    print(f"🔍 DEBUG: FREE user using Google TTS (default)")
+                    return await self._generate_google_tts(request, user_id, authenticated_client)
             else:
                 # Premium users: Choice between Google TTS and ElevenLabs
                 if request.provider:
@@ -220,15 +249,24 @@ class TTSService:
                         return await self._generate_elevenlabs_standard_tts(request, user_id, authenticated_client)
                 elif request.voice_id:
                     # No provider specified, but voice_id given - auto-detect
+                    print(f"🔍 DEBUG: Auto-detecting provider for voice_id: '{request.voice_id}'")
                     voice_profile = await self._get_user_voice_profile(user_id, request.voice_id)
+                    print(f"🔍 DEBUG: Voice profile found: {voice_profile is not None}")
+                    if voice_profile:
+                        print(f"🔍 DEBUG: Voice profile status: {voice_profile.status}")
+                        print(f"🔍 DEBUG: Voice profile provider: {voice_profile.provider}")
+                    
                     if voice_profile and voice_profile.status == VoiceCloneStatus.COMPLETED:
                         # Use cloned voice (ElevenLabs)
+                        print(f"🔍 DEBUG: Using ElevenLabs cloned voice")
                         return await self._generate_elevenlabs_tts(request, user_id, authenticated_client)
                     elif request.voice_id.startswith('google_') or request.voice_id == 'google_default':
                         # Explicitly request Google TTS
+                        print(f"🔍 DEBUG: Using Google TTS (explicit request)")
                         return await self._generate_google_tts(request, user_id, authenticated_client)
                     else:
                         # Use ElevenLabs with standard voice
+                        print(f"🔍 DEBUG: Using ElevenLabs standard voice")
                         return await self._generate_elevenlabs_standard_tts(request, user_id, authenticated_client)
                 else:
                     # No provider or voice_id specified - use Google TTS as default for premium users
@@ -244,6 +282,7 @@ class TTSService:
         """Generate TTS using Google TTS REST API"""
         try:
             print(f"🔍 DEBUG: Google TTS called for text: '{request.text}'")
+            print(f"🔍 DEBUG: Request voice_id: '{request.voice_id}'")
             
             if not hasattr(self, '_google_api_key') or not self._google_api_key:
                 print(f"❌ DEBUG: Google TTS API key not available")
@@ -288,6 +327,9 @@ class TTSService:
             
             # Save audio file and get URL
             audio_url = await self._save_audio_file(user_id, audio_content, "google_tts", request.text, authenticated_client)
+            
+            # Google TTS always uses google_default voice_id, regardless of request
+            print(f"🔍 DEBUG: Google TTS always returns voice_id: 'google_default' (requested: '{request.voice_id}')")
             
             return TTSResponse(
                 success=True,
@@ -409,16 +451,18 @@ class TTSService:
             )
     
     async def _get_user_voice_profile(self, user_id: str, voice_id: Optional[str] = None) -> Optional[UserVoiceProfile]:
-        """Get user's voice profile using anon key with RLS"""
+        """Get user's voice profile using service role key for backend operations"""
         try:
-            # PRODUCTION: Use anon key with RLS for user data operations
-            # This ensures users can only access their own voice profiles
-            query = self.db.client.table("user_voice_profiles").select("*").eq("user_id", user_id).eq("is_active", True)
+            print(f"🔍 DEBUG: Looking up voice profile for user_id: '{user_id}', voice_id: '{voice_id}'")
+            # Use service role database for backend operations (bypasses RLS)
+            db_client = self.service_db if self.service_db else self.db.client
+            query = db_client.table("user_voice_profiles").select("*").eq("user_id", user_id).eq("is_active", True)
             
             if voice_id:
                 query = query.eq("voice_id", voice_id)
             
             result = query.execute()
+            print(f"🔍 DEBUG: Voice profile query returned {len(result.data) if result.data else 0} results")
             
             if result.data:
                 data = result.data[0]

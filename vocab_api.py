@@ -2145,16 +2145,34 @@ async def generate_vocab_tts(
         
         vocab_entry = result.data[0]
         
-        # Create TTS request
-        tts_request = TTSRequest(
-            text=vocab_entry["word"],
+        # Use pronunciation service instead of direct TTS service
+        pronunciation_request = PronunciationRequest(
             vocab_entry_id=vocab_entry_id,
-            voice_id=voice_id,
-            language=language
+            text=vocab_entry["word"],
+            language=language,
+            versions=[PronunciationType.NORMAL],
+            voice_id=voice_id
         )
         
-        response = await tts_service.generate_tts(tts_request, current_user)
-        return response
+        pronunciation_response = await pronunciation_service.generate_pronunciations(pronunciation_request, current_user)
+        
+        if not pronunciation_response.success:
+            raise HTTPException(status_code=500, detail=pronunciation_response.message)
+        
+        # Convert pronunciation response to TTS response format
+        if pronunciation_response.pronunciations and pronunciation_response.pronunciations.versions:
+            normal_version = pronunciation_response.pronunciations.versions.get(PronunciationType.NORMAL)
+            if normal_version:
+                return TTSResponse(
+                    success=True,
+                    message="TTS generated successfully",
+                    audio_url=normal_version.audio_url,
+                    duration_seconds=normal_version.duration_seconds,
+                    provider=normal_version.provider,
+                    voice_id=normal_version.voice_id
+                )
+        
+        raise HTTPException(status_code=500, detail="No pronunciation version generated")
         
     except HTTPException:
         raise

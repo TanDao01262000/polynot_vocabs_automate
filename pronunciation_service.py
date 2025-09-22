@@ -60,16 +60,50 @@ class PronunciationService:
             
             # Check if pronunciations already exist
             existing_pronunciations = await self._get_existing_pronunciations(request.vocab_entry_id)
+            print(f"🔍 DEBUG: Found {len(existing_pronunciations)} existing pronunciations")
+            print(f"🔍 DEBUG: Request voice_id: '{request.voice_id}'")
             
             # Generate missing pronunciations
             generated_versions = []
             pronunciation_versions = {}
             
             for version_type in request.versions:
-                # Check if this version already exists
+                # Check if this version already exists with the same voice_id AND provider
                 if version_type in existing_pronunciations:
-                    pronunciation_versions[version_type] = existing_pronunciations[version_type]
-                    continue
+                    existing_pronunciation = existing_pronunciations[version_type]
+                    existing_voice_id = existing_pronunciation.voice_id
+                    existing_provider = existing_pronunciation.provider
+                    
+                    print(f"🔍 DEBUG: Existing pronunciation voice_id: '{existing_voice_id}', provider: '{existing_provider}'")
+                    print(f"🔍 DEBUG: Request voice_id: '{request.voice_id}'")
+                    
+                    # Check if both voice_id and provider match
+                    voice_id_matches = existing_voice_id == request.voice_id
+                    
+                    # Determine expected provider based on voice_id
+                    expected_provider = None
+                    if request.voice_id and request.voice_id != "google_default" and not request.voice_id.startswith("google_"):
+                        # Custom voice should use ElevenLabs
+                        expected_provider = "elevenlabs"
+                    else:
+                        # Google voice should use Google TTS
+                        expected_provider = "google_tts"
+                    
+                    provider_matches = existing_provider.value == expected_provider
+                    
+                    print(f"🔍 DEBUG: Expected provider: '{expected_provider}', voice_id_matches: {voice_id_matches}, provider_matches: {provider_matches}")
+                    
+                    if voice_id_matches and provider_matches:
+                        # Both voice_id and provider match, use cached version
+                        print(f"🔍 DEBUG: Using cached pronunciation (voice_id and provider match)")
+                        pronunciation_versions[version_type] = existing_pronunciations[version_type]
+                        continue
+                    else:
+                        # Either voice_id or provider doesn't match, need to regenerate
+                        if not voice_id_matches:
+                            print(f"🔄 Voice ID changed from '{existing_voice_id}' to '{request.voice_id}', regenerating pronunciation")
+                        if not provider_matches:
+                            print(f"🔄 Provider changed from '{existing_provider.value}' to '{expected_provider}', regenerating pronunciation")
                 
                 # Generate new pronunciation
                 pronunciation_version = await self._generate_single_pronunciation(
@@ -179,10 +213,45 @@ class PronunciationService:
             
             versions = {}
             
-            # Parse individual version records
+            # Parse individual version records - prefer most recent or best matching
             for version_data in result.data:
                 try:
                     version_type = PronunciationType(version_data["pronunciation_type"])
+                    
+                    # If we already have a version for this type, check if this one is better
+                    if version_type in versions:
+                        existing = versions[version_type]
+                        current_voice_id = version_data.get("voice_id")
+                        existing_voice_id = existing.voice_id
+                        
+                        # Prefer records with non-None voice_id over None
+                        if existing_voice_id is None and current_voice_id is not None:
+                            print(f"🔄 Replacing pronunciation with None voice_id with one that has voice_id: '{current_voice_id}'")
+                            versions[version_type] = PronunciationVersion(
+                                type=version_type,
+                                audio_url=version_data["audio_url"],
+                                provider=VoiceProvider(version_data["provider"]),
+                                voice_id=current_voice_id,
+                                speed=version_data.get("speed", 1.0),
+                                duration_seconds=version_data.get("duration_seconds"),
+                                created_at=datetime.fromisoformat(version_data["created_at"]) if version_data.get("created_at") else None
+                            )
+                        # Prefer records with custom voice_id over google_default
+                        elif existing_voice_id == "google_default" and current_voice_id and current_voice_id != "google_default":
+                            print(f"🔄 Replacing google_default pronunciation with custom voice_id: '{current_voice_id}'")
+                            versions[version_type] = PronunciationVersion(
+                                type=version_type,
+                                audio_url=version_data["audio_url"],
+                                provider=VoiceProvider(version_data["provider"]),
+                                voice_id=current_voice_id,
+                                speed=version_data.get("speed", 1.0),
+                                duration_seconds=version_data.get("duration_seconds"),
+                                created_at=datetime.fromisoformat(version_data["created_at"]) if version_data.get("created_at") else None
+                            )
+                        # Otherwise keep the existing one
+                        continue
+                    
+                    # First record for this version type
                     versions[version_type] = PronunciationVersion(
                         type=version_type,
                         audio_url=version_data["audio_url"],
