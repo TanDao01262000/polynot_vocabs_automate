@@ -40,6 +40,9 @@ class VocabEntry(BaseModel):
     example_translation: str
     level: CEFRLevel
     part_of_speech: Optional[PartOfSpeech] = None
+    # Pronunciation fields
+    pronunciations: Optional[Dict[str, str]] = None  # {"slow": "url1", "fast": "url2", "custom": "url3"}
+    pronunciation_status: Optional[str] = "pending"  # pending, generating, completed, failed
 
 class VocabGenerationResponse(BaseModel):
     """
@@ -361,4 +364,141 @@ class StudySessionAnalytics(BaseModel):
     performance_trend: str  # improving, stable, declining
     recommendations: List[str]
 
-# =========== END OF FLASHCARD MODELS ===========
+# =========== TTS (TEXT-TO-SPEECH) MODELS ===========
+
+class SubscriptionPlan(str, Enum):
+    FREE = "free"
+    PREMIUM = "premium"
+    PRO = "pro"
+
+class VoiceProvider(str, Enum):
+    GOOGLE_TTS = "google_tts"
+    ELEVENLABS = "elevenlabs"
+
+class VoiceCloneStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+class UserVoiceProfile(BaseModel):
+    """User's voice profile for TTS"""
+    id: Optional[str] = None
+    user_id: str
+    voice_name: str
+    provider: VoiceProvider
+    voice_id: Optional[str] = None  # Provider-specific voice ID
+    status: VoiceCloneStatus = VoiceCloneStatus.PENDING
+    audio_samples: Optional[List[str]] = None  # URLs to audio files
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    is_active: bool = True
+
+class TTSRequest(BaseModel):
+    """Request to generate TTS audio"""
+    text: str
+    vocab_entry_id: Optional[str] = None
+    voice_id: Optional[str] = None  # If None, use user's default voice
+    provider: Optional[VoiceProvider] = None  # If None, auto-select based on subscription
+    language: str = "en-US"
+    speed: float = 1.0  # 0.25 to 4.0
+    pitch: float = 0.0  # -20.0 to 20.0
+    volume: float = 1.0  # 0.0 to 1.0
+
+class TTSResponse(BaseModel):
+    """Response for TTS generation"""
+    success: bool
+    message: str
+    audio_url: Optional[str] = None
+    audio_data: Optional[bytes] = None
+    duration_seconds: Optional[float] = None
+    provider: Optional[VoiceProvider] = None
+    voice_id: Optional[str] = None
+    
+    class Config:
+        # Exclude audio_data from JSON serialization to avoid Unicode errors
+        exclude = {"audio_data"}
+
+class VoiceCloneRequest(BaseModel):
+    """Request to create a voice clone"""
+    voice_name: str
+    audio_files: List[str]  # Base64 encoded audio or file URLs
+    description: Optional[str] = None
+
+class VoiceCloneResponse(BaseModel):
+    """Response for voice cloning"""
+    success: bool
+    message: str
+    voice_profile: Optional[UserVoiceProfile] = None
+    estimated_processing_time: Optional[int] = None  # minutes
+
+class UserSubscription(BaseModel):
+    """User subscription information"""
+    user_id: str
+    plan: SubscriptionPlan
+    is_active: bool = True
+    expires_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    features: Dict[str, bool] = {
+        "voice_cloning": False,
+        "unlimited_tts": False,
+        "custom_voices": False,
+        "high_quality_audio": False
+    }
+
+class AudioFile(BaseModel):
+    """Audio file metadata"""
+    id: Optional[str] = None
+    user_id: str
+    filename: str
+    file_url: str
+    file_size: int
+    duration_seconds: Optional[float] = None
+    mime_type: str
+    created_at: Optional[datetime] = None
+
+# =========== PRONUNCIATION MODELS ===========
+
+class PronunciationType(str, Enum):
+    SLOW = "slow"
+    NORMAL = "normal"
+    FAST = "fast"
+    CUSTOM = "custom"
+
+class PronunciationVersion(BaseModel):
+    """A specific pronunciation version for a vocabulary entry"""
+    type: PronunciationType
+    audio_url: str
+    provider: VoiceProvider
+    voice_id: Optional[str] = None
+    speed: float = 1.0
+    duration_seconds: Optional[float] = None
+    created_at: Optional[datetime] = None
+
+class VocabPronunciation(BaseModel):
+    """Complete pronunciation data for a vocabulary entry"""
+    vocab_entry_id: str
+    user_id: str
+    word: str
+    versions: Dict[PronunciationType, PronunciationVersion]
+    status: str = "pending"  # pending, generating, completed, failed
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+class PronunciationRequest(BaseModel):
+    """Request to generate pronunciations for vocabulary"""
+    vocab_entry_id: str
+    versions: List[PronunciationType] = [PronunciationType.NORMAL, PronunciationType.SLOW]
+    voice_id: Optional[str] = None
+    language: str = "en-US"
+
+class PronunciationResponse(BaseModel):
+    """Response for pronunciation generation"""
+    success: bool
+    message: str
+    vocab_entry_id: str
+    pronunciations: Optional[VocabPronunciation] = None
+    generated_versions: List[PronunciationType] = []
+
+# =========== END OF PRONUNCIATION MODELS ===========

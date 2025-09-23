@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import uuid
 import hashlib
 import secrets
+import os
 
 # Import your existing modules
 from vocab_agent import run_single_topic_generation, run_continuous_vocab_generation, view_saved_topic_lists
@@ -14,11 +15,20 @@ from models import (
     CEFRLevel, VocabListViewRequest, VocabListViewResponse, VocabEntryActionRequest, 
     VocabListRequest, VocabListResponse, FlashcardSessionRequest, FlashcardAnswerRequest,
     FlashcardSessionResponse, StudyMode, DifficultyRating, FlashcardCard, FlashcardStats,
-    SessionType, SpacedRepetitionSettings, StudyReminder, FlashcardAchievement
+    SessionType, SpacedRepetitionSettings, StudyReminder, FlashcardAchievement,
+    # TTS Models
+    TTSRequest, TTSResponse, VoiceCloneRequest, VoiceCloneResponse, 
+    UserVoiceProfile, UserSubscription, SubscriptionPlan,
+    # Pronunciation Models
+    PronunciationRequest, PronunciationResponse, VocabPronunciation, PronunciationType
 )
 from config import Config
 from topics import get_categories, get_topics_by_category, get_topic_list
 from supabase_database import SupabaseVocabDatabase
+from tts_service import TTSService
+from pronunciation_service import pronunciation_service
+from voice_cloning_api import router as voice_cloning_router
+# from tts_api import router as tts_router  # Commented out due to path conflict
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -38,143 +48,105 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize database
+# Initialize database and services
 db = SupabaseVocabDatabase()
+tts_service = TTSService()
+
+# Include voice cloning router
+app.include_router(voice_cloning_router)
+# app.include_router(tts_router)  # Commented out due to path conflict
 
 # In-memory session storage (in production, use Redis or database)
 active_sessions = {}
 
 # =========== AUTHENTICATION HELPER ===========
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+# Auth endpoints removed - use main auth server on port 8000
+# /auth/login, /auth/register, /auth/logout are handled by the main server
 
-@app.post("/auth/login", tags=["Authentication"])
-async def login(request: LoginRequest):
-    """Secure login endpoint with session management"""
-    
-    # SECURITY: Only accept specific credentials
-    if request.username == "Tan" and request.password == "Khanh123:)":
-        # Use the actual user ID from the database
-        user_id = "206a458c-c01a-4f20-aec3-08107df8c515"
-        
-        print(f"Using user ID: {user_id}")
-        
-        # Create user profile if it doesn't exist
-        await ensure_user_exists(user_id, request.username)
-        
-        # SECURITY FIX: Create a secure session token
-        session_token = secrets.token_urlsafe(32)
-        session_expiry = datetime.now() + timedelta(hours=24)  # 24 hour expiry
-        
-        # Store session in memory (in production, use Redis or database)
-        active_sessions[session_token] = {
-            "user_id": user_id,
-            "username": request.username,
-            "created_at": datetime.now(),
-            "expires_at": session_expiry
-        }
-        
-        return {
-            "success": True,
-            "message": "Login successful",
-            "user_id": user_id,
-            "username": request.username,
-            "session_token": session_token,
-            "expires_at": session_expiry.isoformat()
-        }
-    else:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
 
-@app.post("/auth/logout", tags=["Authentication"])
-async def logout(authorization: Optional[str] = Header(None)):
-    """Logout and invalidate session"""
+
+async def get_current_user(authorization: Optional[str] = Header(None)) -> str:
+    """Extract and validate user from Supabase Auth token"""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header required")
     
     try:
         # Extract token
         if authorization.startswith("Bearer "):
-            token = authorization[7:]
+            token = authorization[7:]  # Remove "Bearer " prefix
         else:
             token = authorization
         
-        # Remove session if it exists
-        if token in active_sessions:
-            del active_sessions[token]
-            return {
-                "success": True,
-                "message": "Logged out successfully"
-            }
-        else:
-            return {
-                "success": True,
-                "message": "Session not found (already logged out)"
-            }
+        # Validate token directly with Supabase
+        user_response = db.client.auth.get_user(token)
+        
+        if not user_response or not user_response.user:
+            raise HTTPException(status_code=401, detail="Invalid Supabase Auth token")
+        
+        user = user_response.user
+        user_id = user.id
+        
+        # Ensure user exists in vocab database
+        await ensure_user_exists(user_id, user.email)
+        
+        return user_id
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Logout failed: {str(e)}")
+        raise HTTPException(status_code=401, detail=f"Authentication verification failed: {str(e)}")
 
-async def get_current_user(authorization: Optional[str] = Header(None)) -> str:
-    """Extract and validate user from session token or user ID (backward compatibility)"""
+async def get_current_user_and_client(authorization: Optional[str] = Header(None)) -> tuple[str, any]:
+    """Extract and validate user from Supabase Auth token, return user_id and authenticated client"""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header required")
     
     try:
-        # Check if it's a session token (new secure method)
+        # Extract token
         if authorization.startswith("Bearer "):
             token = authorization[7:]  # Remove "Bearer " prefix
         else:
             token = authorization
         
-        # First, try to validate as session token
-        if token in active_sessions:
-            session = active_sessions[token]
-            # Check if session is expired
-            if datetime.now() > session["expires_at"]:
-                # Remove expired session
-                del active_sessions[token]
-                raise HTTPException(status_code=401, detail="Session expired")
-            
-            # Session is valid, return user ID
-            return session["user_id"]
+        # Validate token directly with Supabase
+        user_response = db.client.auth.get_user(token)
         
-        # Backward compatibility: Check if it's a valid UUID (old method)
-        import uuid
-        try:
-            uuid.UUID(token)
-            # This is a user ID, check if user exists
-            result = db.client.table("profiles").select("id").eq("id", token).execute()
-            if not result.data:
-                raise HTTPException(status_code=401, detail="User not found or not authenticated")
-            return token
-        except ValueError:
-            # Not a valid UUID, must be an invalid token
-            raise HTTPException(status_code=401, detail="Invalid session token or user ID")
+        if not user_response or not user_response.user:
+            raise HTTPException(status_code=401, detail="Invalid Supabase Auth token")
+        
+        user = user_response.user
+        user_id = user.id
+        
+        # Ensure user exists in vocab database
+        await ensure_user_exists(user_id, user.email)
+        
+        # Return user_id and None for authenticated_client (not needed for current setup)
+        return user_id, None
         
     except HTTPException:
         raise
-    except Exception:
-        raise HTTPException(status_code=401, detail="Authentication verification failed")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication verification failed: {str(e)}")
 
-async def ensure_user_exists(user_id: str, username: str = None) -> bool:
+async def ensure_user_exists(user_id: str, email: str = None) -> bool:
     """Ensure user exists in the profiles table, create if necessary"""
     try:
         # Check if user exists
         result = db.client.table("profiles").select("id").eq("id", user_id).execute()
         
         if not result.data:
-            # User doesn't exist, create them
+            # User doesn't exist, create basic profile
             user_data = {
                 "id": user_id,
-                "email": f"{username or 'user'}@example.com" if username else f"user-{user_id}@example.com",
+                "email": email or f"user_{user_id}@example.com",
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat()
             }
             
-            # Add username if provided
-            if username:
-                user_data["username"] = username
+            # Add username from email if available
+            if email:
+                user_data["user_name"] = email.split("@")[0]
             
             db.client.table("profiles").insert(user_data).execute()
             print(f"Created user profile for {user_id}")
@@ -693,22 +665,45 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
         filtered_entries = filter_duplicates(relevant_entries, existing_combinations)
         
         # Save new vocabulary entries to vocab_entries table (but not to user's personal lists)
+        inserted_result = None
         if filtered_entries:
-            db.insert_vocab_entries(
+            inserted_result = db.insert_vocab_entries(
                 entries=filtered_entries,
                 topic_name=topic,
                 category_name=None,  # Will be determined by topic
                 target_language=language_to_learn,
                 original_language=learners_native_language
             )
-            print(f"Saved {len(filtered_entries)} new vocabulary entries to database")
+            print(f"Saved {inserted_result['inserted_count']} new vocabulary entries to database")
         
-        # Create response entries with duplicate flags and include all necessary info
+        # Create response entries with actual database IDs and duplicate flags
         response_entries = []
+        inserted_entries_map = {}
+        
+        # Create a map of inserted entries by word for quick lookup
+        if inserted_result and inserted_result['inserted_entries']:
+            for item in inserted_result['inserted_entries']:
+                inserted_entries_map[item['entry'].word] = item['id']
+        
+        # Get existing entries from database for duplicates
+        existing_entries_map = {}
+        if relevant_entries:  # If we have entries to process, get existing entries from database
+            existing_entries = db.get_vocab_entries(topic_name=topic, limit=1000)
+            for existing_entry in existing_entries:
+                existing_entries_map[existing_entry['word'].lower()] = existing_entry['id']
+        
         for entry in relevant_entries:
             is_duplicate = entry not in filtered_entries
+            # Use actual database ID if available (new or existing), otherwise generate a UUID
+            if entry.word in inserted_entries_map:
+                entry_id = inserted_entries_map[entry.word]
+            elif is_duplicate and entry.word.lower() in existing_entries_map:
+                entry_id = existing_entries_map[entry.word.lower()]
+            else:
+                entry_id = str(uuid.uuid4())
+            
             response_entries.append(VocabEntryResponse(
-                id=str(uuid.uuid4()),  # Generate unique ID for frontend
+                id=entry_id,  # Use actual database ID
                 word=entry.word,
                 definition=entry.definition,
                 translation=entry.translation,  # Include translation
@@ -801,11 +796,34 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
             # Filter out duplicates for database storage only
             filtered_entries = filter_duplicates(relevant_entries, existing_combinations)
             
+            # Save new vocabulary entries to vocab_entries table (but not to user's personal lists)
+            inserted_result = None
+            if filtered_entries:
+                inserted_result = db.insert_vocab_entries(
+                    entries=filtered_entries,
+                    topic_name=topic,
+                    category_name=None,  # Will be determined by topic
+                    target_language=language_to_learn,
+                    original_language=learners_native_language
+                )
+                print(f"Saved {inserted_result['inserted_count']} new vocabulary entries to database")
+            
+            # Create response entries with actual database IDs and duplicate flags
+            inserted_entries_map = {}
+            
+            # Create a map of inserted entries by word for quick lookup
+            if inserted_result and inserted_result['inserted_entries']:
+                for item in inserted_result['inserted_entries']:
+                    inserted_entries_map[item['entry'].word] = item['id']
+            
             # Create response entries with duplicate flags
             for entry in relevant_entries:
                 is_duplicate = entry not in filtered_entries
+                # Use actual database ID if available, otherwise generate a UUID
+                entry_id = inserted_entries_map.get(entry.word, str(uuid.uuid4()))
+                
                 all_response_entries.append(VocabEntryResponse(
-                    id=str(uuid.uuid4()),  # Generate unique ID for frontend
+                    id=entry_id,  # Use actual database ID
                     word=entry.word,
                     definition=entry.definition,
                     translation=entry.translation,  # Include translation
@@ -2095,6 +2113,310 @@ async def validate_cache_quality(sample_size: int = 100):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to validate cache quality: {str(e)}")
+
+# =========== TTS (TEXT-TO-SPEECH) ENDPOINTS ===========
+
+@app.post("/tts/generate", response_model=TTSResponse, tags=["TTS"])
+async def generate_tts(
+    request: TTSRequest,
+    auth_data: tuple = Depends(get_current_user_and_client)
+):
+    """Generate TTS audio for vocabulary or custom text"""
+    try:
+        current_user, authenticated_client = auth_data
+        response = await tts_service.generate_tts(request, current_user, authenticated_client)
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
+
+@app.post("/tts/generate-vocab/{vocab_entry_id}", response_model=TTSResponse, tags=["TTS"])
+async def generate_vocab_tts(
+    vocab_entry_id: str,
+    current_user: str = Depends(get_current_user),
+    voice_id: Optional[str] = None,
+    language: str = "en-US"
+):
+    """Generate TTS audio for a specific vocabulary entry"""
+    try:
+        # Get vocabulary entry
+        result = db.client.table("vocab_entries").select("*").eq("id", vocab_entry_id).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Vocabulary entry not found")
+        
+        vocab_entry = result.data[0]
+        
+        # Use pronunciation service instead of direct TTS service
+        pronunciation_request = PronunciationRequest(
+            vocab_entry_id=vocab_entry_id,
+            text=vocab_entry["word"],
+            language=language,
+            versions=[PronunciationType.NORMAL],
+            voice_id=voice_id
+        )
+        
+        pronunciation_response = await pronunciation_service.generate_pronunciations(pronunciation_request, current_user)
+        
+        if not pronunciation_response.success:
+            raise HTTPException(status_code=500, detail=pronunciation_response.message)
+        
+        # Convert pronunciation response to TTS response format
+        if pronunciation_response.pronunciations and pronunciation_response.pronunciations.versions:
+            normal_version = pronunciation_response.pronunciations.versions.get(PronunciationType.NORMAL)
+            if normal_version:
+                return TTSResponse(
+                    success=True,
+                    message="TTS generated successfully",
+                    audio_url=normal_version.audio_url,
+                    duration_seconds=normal_version.duration_seconds,
+                    provider=normal_version.provider,
+                    voice_id=normal_version.voice_id
+                )
+        
+        raise HTTPException(status_code=500, detail="No pronunciation version generated")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Vocabulary TTS generation failed: {str(e)}")
+
+@app.post("/tts/voice-clone", response_model=VoiceCloneResponse, tags=["TTS"])
+async def create_voice_clone(
+    request: VoiceCloneRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Create a voice clone for the user"""
+    try:
+        result = await tts_service.create_voice_clone(
+            user_id=current_user,
+            voice_name=request.voice_name,
+            audio_files=request.audio_files
+        )
+        
+        return VoiceCloneResponse(
+            success=result["success"],
+            message=result["message"],
+            estimated_processing_time=result.get("estimated_processing_time")
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Voice cloning failed: {str(e)}")
+
+@app.get("/tts/voice-profiles", response_model=List[UserVoiceProfile], tags=["TTS"])
+async def get_voice_profiles(
+    current_user: str = Depends(get_current_user)
+):
+    """Get all voice profiles for the current user"""
+    try:
+        profiles = await tts_service.get_user_voice_profiles(current_user)
+        return profiles
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get voice profiles: {str(e)}")
+
+@app.get("/tts/subscription", response_model=UserSubscription, tags=["TTS"])
+async def get_user_subscription(
+    current_user: str = Depends(get_current_user)
+):
+    """Get user's subscription information"""
+    try:
+        subscription = await tts_service.get_user_subscription(current_user)
+        return subscription
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get subscription: {str(e)}")
+
+@app.get("/tts/quota", tags=["TTS"])
+async def get_tts_quota(
+    current_user: str = Depends(get_current_user)
+):
+    """Get user's TTS quota information including voice clone usage"""
+    try:
+        subscription = await tts_service.get_user_subscription(current_user)
+        has_quota = await tts_service.check_tts_quota(current_user)
+        
+        # Get today's TTS usage
+        today = datetime.now().date()
+        result = db.client.table("tts_usage").select("*").eq("user_id", current_user).eq("date", today.isoformat()).execute()
+        usage_count = len(result.data) if result.data else 0
+        
+        # Get voice clone usage (count of active voice profiles)
+        # Use service role client for backend operations to bypass RLS
+        try:
+            from config import Config
+            from supabase import create_client
+            
+            if Config.SUPABASE_SERVICE_ROLE_KEY:
+                service_client = create_client(Config.SUPABASE_URL, Config.SUPABASE_SERVICE_ROLE_KEY)
+                voice_profiles_result = service_client.table("user_voice_profiles").select("*").eq(
+                    "user_id", current_user
+                ).eq("is_active", True).execute()
+            else:
+                # Fallback to regular client
+                voice_profiles_result = db.client.table("user_voice_profiles").select("*").eq(
+                    "user_id", current_user
+                ).eq("is_active", True).execute()
+                
+            voice_clones_used = len(voice_profiles_result.data) if voice_profiles_result.data else 0
+        except Exception as e:
+            print(f"❌ Error querying voice profiles: {e}")
+            voice_clones_used = 0
+        
+        # Debug logging for voice clone counting
+        print(f"🔍 DEBUG: User {current_user} voice clone usage:")
+        print(f"   📊 Raw query result: {voice_profiles_result.data}")
+        print(f"   🔢 Voice clones found: {voice_clones_used}")
+        print(f"   📋 Subscription plan: {subscription.plan.value}")
+        
+        # Calculate quota limits
+        if subscription.plan == SubscriptionPlan.FREE:
+            max_requests = Config.MAX_FREE_TTS_REQUESTS_PER_DAY
+            voice_clones_limit = Config.MAX_FREE_VOICE_CLONES
+        elif subscription.plan == SubscriptionPlan.PREMIUM:
+            max_requests = Config.MAX_PREMIUM_TTS_REQUESTS_PER_DAY
+            voice_clones_limit = Config.MAX_PREMIUM_VOICE_CLONES
+        else:
+            max_requests = Config.MAX_PREMIUM_TTS_REQUESTS_PER_DAY
+            voice_clones_limit = Config.MAX_PRO_VOICE_CLONES
+        
+        return {
+            "success": True,
+            "plan": subscription.plan.value,
+            "usage_today": usage_count,
+            "max_requests": max_requests,
+            "remaining_requests": max_requests - usage_count,
+            "has_quota": has_quota,
+            "voice_clones_used": voice_clones_used,
+            "voice_clones_limit": voice_clones_limit,
+            "voice_clones_remaining": voice_clones_limit - voice_clones_used,
+            "features": subscription.features
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get quota information: {str(e)}")
+
+@app.delete("/tts/voice-profiles/{voice_profile_id}", tags=["TTS"])
+async def delete_voice_profile(
+    voice_profile_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Delete a voice profile"""
+    try:
+        # Verify ownership
+        result = db.client.table("user_voice_profiles").select("*").eq("id", voice_profile_id).eq("user_id", current_user).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Voice profile not found")
+        
+        # Deactivate the voice profile
+        db.client.table("user_voice_profiles").update({
+            "is_active": False,
+            "updated_at": datetime.now().isoformat()
+        }).eq("id", voice_profile_id).execute()
+        
+        return {
+            "success": True,
+            "message": "Voice profile deleted successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete voice profile: {str(e)}")
+
+# =========== TTS PRONUNCIATION ENDPOINTS ===========
+
+@app.post("/tts/pronunciation/generate", response_model=PronunciationResponse, tags=["TTS"])
+async def generate_pronunciations(
+    request: PronunciationRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Generate multiple pronunciation versions for a vocabulary entry"""
+    try:
+        response = await pronunciation_service.generate_pronunciations(request, current_user)
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Pronunciation generation failed: {str(e)}")
+
+@app.get("/tts/pronunciation/{vocab_entry_id}", response_model=VocabPronunciation, tags=["TTS"])
+async def get_pronunciations(
+    vocab_entry_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Get pronunciations for a vocabulary entry"""
+    try:
+        pronunciations = await pronunciation_service.get_pronunciations(vocab_entry_id)
+        if not pronunciations:
+            raise HTTPException(status_code=404, detail="Pronunciations not found")
+        return pronunciations
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get pronunciations: {str(e)}")
+
+@app.post("/tts/pronunciation/ensure/{vocab_entry_id}", tags=["TTS"])
+async def ensure_pronunciations(
+    vocab_entry_id: str,
+    current_user: str = Depends(get_current_user),
+    versions: List[PronunciationType] = [PronunciationType.NORMAL, PronunciationType.SLOW]
+):
+    """Ensure that required pronunciation versions exist for a vocabulary entry"""
+    try:
+        success = await pronunciation_service.ensure_pronunciations_exist(
+            vocab_entry_id=vocab_entry_id,
+            user_id=current_user,
+            required_versions=versions
+        )
+        
+        return {
+            "success": success,
+            "message": "Pronunciations ensured" if success else "Failed to ensure pronunciations",
+            "vocab_entry_id": vocab_entry_id,
+            "required_versions": [v.value for v in versions]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to ensure pronunciations: {str(e)}")
+
+@app.post("/tts/pronunciation/batch", tags=["TTS"])
+async def generate_pronunciations_batch(
+    vocab_entry_ids: List[str],
+    current_user: str = Depends(get_current_user),
+    versions: List[PronunciationType] = [PronunciationType.NORMAL, PronunciationType.SLOW]
+):
+    """Generate pronunciations for multiple vocabulary entries"""
+    try:
+        results = await pronunciation_service.generate_pronunciations_for_batch(
+            vocab_entry_ids=vocab_entry_ids,
+            user_id=current_user,
+            versions=versions
+        )
+        
+        return {
+            "success": True,
+            "message": f"Processed {len(vocab_entry_ids)} vocabulary entries",
+            "results": results,
+            "total_processed": len(vocab_entry_ids),
+            "successful": sum(1 for r in results.values() if r.success),
+            "failed": sum(1 for r in results.values() if not r.success)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Batch pronunciation generation failed: {str(e)}")
+
+@app.delete("/tts/pronunciation/{vocab_entry_id}", tags=["TTS"])
+async def delete_pronunciations(
+    vocab_entry_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Delete pronunciations for a vocabulary entry"""
+    try:
+        success = await pronunciation_service.delete_pronunciations(vocab_entry_id)
+        
+        return {
+            "success": success,
+            "message": "Pronunciations deleted successfully" if success else "Failed to delete pronunciations",
+            "vocab_entry_id": vocab_entry_id
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete pronunciations: {str(e)}")
 
 # =========== Main Application ===========
 

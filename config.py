@@ -16,6 +16,7 @@ class Config:
     # Supabase Configuration
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+    SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     
     # LLM Configuration
     LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
@@ -33,6 +34,41 @@ class Config:
     DEFAULT_PHRASAL_VERBS_PER_BATCH = int(os.getenv("DEFAULT_PHRASAL_VERBS_PER_BATCH", "10"))  # Reduced from 25
     DEFAULT_IDIOMS_PER_BATCH = int(os.getenv("DEFAULT_IDIOMS_PER_BATCH", "5"))  # Reduced from 25
     DEFAULT_DELAY_SECONDS = int(os.getenv("DEFAULT_DELAY_SECONDS", "3"))
+    
+    # TTS Configuration
+    # Google TTS
+    GOOGLE_TTS_API_KEY = os.getenv("GOOGLE_TTS_API_KEY")
+    GOOGLE_TTS_PROJECT_ID = os.getenv("GOOGLE_TTS_PROJECT_ID")
+    
+    # ElevenLabs
+    ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+    ELEVENLABS_BASE_URL = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io/v1")
+    
+    # TTS Settings
+    DEFAULT_TTS_LANGUAGE = os.getenv("DEFAULT_TTS_LANGUAGE", "en-US")
+    MAX_FREE_TTS_REQUESTS_PER_DAY = int(os.getenv("MAX_FREE_TTS_REQUESTS_PER_DAY", "50"))
+    MAX_PREMIUM_TTS_REQUESTS_PER_DAY = int(os.getenv("MAX_PREMIUM_TTS_REQUESTS_PER_DAY", "500"))
+    TTS_AUDIO_FORMAT = os.getenv("TTS_AUDIO_FORMAT", "mp3")
+    TTS_AUDIO_QUALITY = os.getenv("TTS_AUDIO_QUALITY", "high")  # low, medium, high
+    
+    # Voice Clone Limits
+    MAX_FREE_VOICE_CLONES = int(os.getenv("MAX_FREE_VOICE_CLONES", "1"))
+    MAX_PREMIUM_VOICE_CLONES = int(os.getenv("MAX_PREMIUM_VOICE_CLONES", "5"))
+    MAX_PRO_VOICE_CLONES = int(os.getenv("MAX_PRO_VOICE_CLONES", "10"))
+    
+    # Audio Storage Configuration
+    AUDIO_STORAGE_TYPE = os.getenv("AUDIO_STORAGE_TYPE", "local")  # local, s3, gcs, supabase
+    LOCAL_AUDIO_PATH = os.getenv("LOCAL_AUDIO_PATH", "audio_files")
+    
+    # AWS S3 Configuration
+    AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+    AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+    AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+    
+    # Google Cloud Storage Configuration
+    GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
+    GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     
     @classmethod
     def validate(cls):

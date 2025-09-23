@@ -117,6 +117,7 @@ class SupabaseVocabDatabase:
         """Insert multiple vocab entries into Supabase, skipping duplicates"""
         inserted_count = 0
         skipped_count = 0
+        inserted_entries = []  # Store inserted entries with their IDs
         
         # Enforce that every vocab must be linked to a topic
         if not topic_name:
@@ -149,6 +150,13 @@ class SupabaseVocabDatabase:
                 
                 if result.data:
                     inserted_count += 1
+                    # Store the entry with its database ID
+                    inserted_entry = result.data[0]
+                    inserted_entries.append({
+                        "entry": entry,
+                        "id": inserted_entry["id"],
+                        "database_data": inserted_entry
+                    })
                 else:
                     skipped_count += 1
                     
@@ -162,6 +170,11 @@ class SupabaseVocabDatabase:
                     raise
         
         print(f"Inserted {inserted_count} new vocab entries, skipped {skipped_count} duplicates")
+        return {
+            "inserted_count": inserted_count,
+            "skipped_count": skipped_count,
+            "inserted_entries": inserted_entries
+        }
     
     def get_vocab_entries(self, topic_name: str = None, category_name: str = None, 
                          level: CEFRLevel = None, limit: int = 100) -> List[Dict[str, Any]]:
@@ -875,7 +888,49 @@ class SupabaseVocabDatabase:
             )
             
             if not cards:
-                raise ValueError("No vocabulary cards available for this session")
+                print(f"🔍 DEBUG: No cards found for user {user_id}")
+                print(f"🔍 DEBUG: Request filters - topic: {request.topic_name}, category: {request.category_name}, level: {request.level}")
+                print(f"🔍 DEBUG: Advanced filters - max_cards: {request.max_cards}, include_reviewed: {request.include_reviewed}")
+                
+                # If a specific level was requested and no cards found, try without level filter
+                if request.level:
+                    print(f"🔄 DEBUG: No cards found for level {request.level}, trying without level filter...")
+                    cards = self._get_flashcard_cards_advanced(
+                        user_id=user_id,
+                        topic_name=request.topic_name,
+                        category_name=request.category_name,
+                        level=None,  # Remove level filter
+                        max_cards=request.max_cards,
+                        include_reviewed=request.include_reviewed,
+                        include_favorites=request.include_favorites,
+                        difficulty_filter=request.difficulty_filter,
+                        smart_selection=request.smart_selection
+                    )
+                    
+                    if cards:
+                        print(f"✅ DEBUG: Found {len(cards)} cards without level filter")
+                    else:
+                        print("❌ DEBUG: Still no cards found even without level filter")
+                
+                if not cards:
+                    # Get available levels for better error message
+                    user_vocab_result = self.client.table("user_vocab_entries").select("vocab_entry_id").eq("user_id", user_id).execute()
+                    if user_vocab_result.data:
+                        vocab_ids = [row["vocab_entry_id"] for row in user_vocab_result.data]
+                        level_result = self.client.table("vocab_entries").select("level").in_("id", vocab_ids).execute()
+                        available_levels = list(set([entry.get("level") for entry in level_result.data if entry.get("level")]))
+                        
+                        if request.level and available_levels:
+                            raise ValueError(f"No vocabulary cards available for level {request.level}. Available levels: {', '.join(sorted(available_levels))}")
+                        elif available_levels:
+                            raise ValueError(f"No vocabulary cards available for this session. You have vocabulary at levels: {', '.join(sorted(available_levels))}")
+                        else:
+                            raise ValueError("No vocabulary cards available. Please add some vocabulary entries first.")
+                    else:
+                        raise ValueError("No vocabulary cards available. Please add some vocabulary entries first.")
+                else:
+                    # Update the request level to None since we removed the filter
+                    request.level = None
             
             # Create session
             session_data = {
@@ -1043,7 +1098,7 @@ class SupabaseVocabDatabase:
             
             if not user_vocab_result.data:
                 # FALLBACK: If user has no saved vocabulary, use AI-curated vocabulary pool
-                print(f"User {user_id} has no saved vocabulary. Using AI-curated vocabulary pool.")
+                print(f"🔍 DEBUG: User {user_id} has no saved vocabulary. Using AI-curated vocabulary pool.")
                 return self._get_ai_curated_flashcard_cards(
                     topic_name=topic_name,
                     category_name=category_name,
@@ -1051,11 +1106,16 @@ class SupabaseVocabDatabase:
                     max_cards=max_cards
                 )
             
+            print(f"🔍 DEBUG: Found {len(user_vocab_result.data)} user vocab entries")
+            print(f"🔍 DEBUG: include_reviewed: {include_reviewed}")
+            
             # Get vocab entry IDs
             vocab_ids = [row["vocab_entry_id"] for row in user_vocab_result.data]
             query = query.in_("id", vocab_ids)
             
             result = query.limit(max_cards * 2).execute()  # Get more for smart selection
+            print(f"🔍 DEBUG: Query returned {len(result.data)} vocab entries")
+            print(f"🔍 DEBUG: vocab_ids to search: {vocab_ids[:5]}...")  # Show first 5 IDs
             
             if not result.data:
                 return []
