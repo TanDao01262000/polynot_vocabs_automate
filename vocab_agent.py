@@ -3,9 +3,11 @@ from topics import get_topic_list, get_categories, get_topics_by_category
 from typing_extensions import TypedDict
 from typing import List
 from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
 from supabase_database import SupabaseVocabDatabase
 from config import Config
+from langchain_tavily import TavilySearch
 import os
 
 # Validate configuration
@@ -22,11 +24,23 @@ os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 llm = ChatOpenAI(
     model=Config.LLM_MODEL,
     temperature=Config.TOPIC_FOCUS_TEMPERATURE,  # Use topic-focused temperature
+    request_timeout=60,  # Increase timeout for complex operations
     api_key=Config.OPENAI_API_KEY
 )
 
 # =========== Database ===========
 db = SupabaseVocabDatabase()
+
+# =========== Search Tool Disabled ===========
+# Search tool was making vocabulary generation worse
+# Using direct creative generation instead
+print("🔧 Search tool disabled - using direct creative generation")
+
+# =========== Search Functions Disabled ===========
+def search_for_topic_context(topic: str, level: str = None, language: str = "English") -> str:
+    """Search function disabled - using direct creative generation"""
+    print("🔧 Search function disabled - using direct creative generation")
+    return ""
 
 # =========== State ===========
 class State(TypedDict):
@@ -36,6 +50,11 @@ class State(TypedDict):
 	original_langauge: str
 	vocab_list: list[str]
 	vocab_entries: list[VocabEntry]
+	search_context: str  # Add search context to state
+	use_search: bool     # Add search flag to state
+	vocab_per_batch: int  # Add batch parameters
+	phrasal_verbs_per_batch: int
+	idioms_per_batch: int
 
 
 structured_llm = llm.with_structured_output(VocabGenerationResponse)
@@ -43,16 +62,22 @@ structured_llm = llm.with_structured_output(VocabGenerationResponse)
 # =========== Nodes - functions ===========
 
 def filter_duplicates(entries: List[VocabEntry], existing_combinations: List[tuple]) -> List[VocabEntry]:
-    """Filter out entries that already exist in the database"""
+    """Filter out entries that already exist in the database (less aggressive)"""
     filtered_entries = []
+    existing_keys = [(combo[0].lower(), combo[1], combo[2]) for combo in existing_combinations]
+    
+    print(f"🔍 Checking {len(entries)} entries against {len(existing_combinations)} existing combinations")
+    
     for entry in entries:
         # Create combination key: (word, level, part_of_speech)
         entry_key = (entry.word.lower(), entry.level.value, entry.part_of_speech.value if entry.part_of_speech else None)
         
-        if entry_key not in [(combo[0].lower(), combo[1], combo[2]) for combo in existing_combinations]:
+        if entry_key not in existing_keys:
             filtered_entries.append(entry)
         else:
             print(f"Filtered out duplicate: {entry.word} ({entry.part_of_speech.value if entry.part_of_speech else 'unknown'})")
+    
+    print(f"🔍 Duplicate filtering: {len(entries)} → {len(filtered_entries)} entries")
     return filtered_entries
 
 def get_existing_combinations_for_topic(topic_name: str, category_name: str = None) -> List[tuple]:
@@ -125,8 +150,13 @@ def run_continuous_vocab_generation(
     idioms_per_batch: int = 5,
     delay_seconds: int = 3,
     save_topic_list: bool = False,
-    topic_list_name: str = None
+    topic_list_name: str = None,
+    use_search: bool = False
 ):
+    """
+    Run continuous vocabulary generation using LangGraph workflow
+    Now properly integrates search agent -> vocabulary generation flow
+    """
     """
     Run continuous vocabulary generation for multiple topics and different types.
     
@@ -204,8 +234,47 @@ def run_continuous_vocab_generation(
             existing_combinations = get_existing_combinations_for_topic(current_topic, category)
             print(f"Found {len(existing_combinations)} existing combinations in database")
             
-            # Create simplified, focused prompt
-            prompt = f'''You are an expert {language_to_learn} language teacher creating engaging vocabulary content for {current_topic}.
+            # Search for topic context if enabled
+            search_context = ""
+            if use_search:
+                print(f"🔍 Searching for context about '{current_topic}'...")
+                search_context = search_for_topic_context(current_topic, level.value, language_to_learn)
+                if search_context:
+                    print(f"✅ Found search context: {len(search_context)} characters")
+                else:
+                    print("⚠️ No search context found")
+            
+            # Create enhanced prompt with explicit search context usage
+            if search_context:
+                print(f"🎯 Creating CONTEXT-DRIVEN prompt with LangGraph agent results")
+                prompt = f'''You are an expert {language_to_learn} language teacher. A search agent has provided you with real-world information about {current_topic}. You must create vocabulary based SPECIFICALLY on this researched information.
+
+RESEARCHED CONTEXT (from LangGraph search agent):
+{search_context}
+
+CRITICAL INSTRUCTIONS:
+- ANALYZE the researched context above and extract key vocabulary, terms, and concepts
+- Generate vocabulary that DIRECTLY relates to the specific information in the context
+- Use the actual terminology, concepts, and language patterns from the research
+- DO NOT generate generic vocabulary - base everything on the provided research
+- The vocabulary should reflect the current, real-world usage as found in the research
+
+Generate {language_to_learn} vocabulary for CEFR level {level.value} using the research context:
+
+1. {vocab_per_batch} vocabulary words (extract specific terms from the research)
+2. {phrasal_verbs_per_batch} phrasal verbs/expressions (from the researched material)
+3. {idioms_per_batch} idioms/expressions (related to the research findings)
+
+MANDATORY REQUIREMENTS:
+- EVERY word must be traceable to the research context above
+- Include clear definitions in {language_to_learn}
+- Provide example sentences in {language_to_learn} using the researched concepts
+- Translate examples to {learners_native_language}
+- Ensure {level.value} difficulty level
+- Make vocabulary choices that reflect the specific research findings'''
+            else:
+                print(f"🔧 Creating STANDARD prompt (no search context)")
+                prompt = f'''You are an expert {language_to_learn} language teacher creating engaging vocabulary content for {current_topic}.
 
 Generate diverse and interesting {language_to_learn} vocabulary for CEFR level {level.value}:
 
@@ -319,6 +388,85 @@ def view_saved_topic_lists():
         print(f"   Created: {topic_list['created_at']}")
         print()
 
+# =========== LangGraph Nodes ===========
+
+def search_node(state: State) -> State:
+    """Search node disabled - using direct creative generation"""
+    print("🔧 Search node disabled - using direct creative generation")
+    state["search_context"] = ""
+    return state
+
+def generation_node(state: State) -> State:
+    """Simple, effective vocabulary generation"""
+    topic = state["topic"]
+    level = state["level"]
+    target_language = state["target_language"]
+    original_language = state["original_langauge"]
+    
+    # Get batch parameters from state
+    vocab_per_batch = state.get("vocab_per_batch", 10)
+    phrasal_verbs_per_batch = state.get("phrasal_verbs_per_batch", 5)
+    idioms_per_batch = state.get("idioms_per_batch", 5)
+    
+    print(f"🎯 Generation node: Creating vocabulary for '{topic}'")
+    
+    # Simple, direct prompt that actually works
+    prompt = f'''Generate {target_language} vocabulary for {topic} at {level.value} level.
+
+Create:
+- {vocab_per_batch} vocabulary words
+- {phrasal_verbs_per_batch} phrasal verbs
+- {idioms_per_batch} idioms
+
+Include definitions, examples, and translations to {original_language}.
+
+Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
+    
+    try:
+        import time
+        llm_start = time.time()
+        res = structured_llm.invoke(prompt)
+        llm_time = time.time() - llm_start
+        print(f"⏱️ Generation completed in {llm_time:.2f} seconds")
+        
+        # Combine all entries from structured response
+        all_entries = res.vocabularies + res.phrasal_verbs + res.idioms
+        print(f"✅ Generated {len(all_entries)} vocabulary entries")
+        print(f"🔍 Vocabularies: {len(res.vocabularies)}")
+        print(f"🔍 Phrasal verbs: {len(res.phrasal_verbs)}")
+        print(f"🔍 Idioms: {len(res.idioms)}")
+        
+        state["vocab_entries"] = all_entries
+        return state
+        
+    except Exception as e:
+        print(f"❌ Generation error: {e}")
+        state["vocab_entries"] = []
+        return state
+
+# =========== LangGraph Workflow ===========
+
+def create_vocab_graph() -> StateGraph:
+    """Create the vocabulary generation graph with search integration"""
+    
+    # Create the graph
+    workflow = StateGraph(State)
+    
+    # Add nodes
+    workflow.add_node("search", search_node)
+    workflow.add_node("generate", generation_node)
+    
+    # Add edges
+    workflow.add_edge(START, "search")
+    workflow.add_edge("search", "generate")
+    workflow.add_edge("generate", END)
+    
+    # Compile the graph
+    return workflow.compile()
+
+# Create the compiled graph
+vocab_graph = create_vocab_graph()
+
 def run_single_topic_generation(
     topic: str,
     level: CEFRLevel = CEFRLevel.A2,
@@ -329,20 +477,53 @@ def run_single_topic_generation(
     idioms_per_batch: int = 5,
     delay_seconds: int = 3,
     save_topic_list: bool = False,
-    topic_list_name: str = None
+    topic_list_name: str = None,
+    use_search: bool = False,
+    search_context: str = ""
 ):
     """
-    Generate vocabulary for a single topic
+    Generate vocabulary for a single topic using LangGraph workflow
     """
-    return run_continuous_vocab_generation(
-        topics=[topic],
-        level=level,
-        language_to_learn=language_to_learn,
-        learners_native_language=learners_native_language,
-        vocab_per_batch=vocab_per_batch,
-        phrasal_verbs_per_batch=phrasal_verbs_per_batch,
-        idioms_per_batch=idioms_per_batch,
-        delay_seconds=delay_seconds,
-        save_topic_list=save_topic_list,
-        topic_list_name=topic_list_name
-    )
+    print(f"🚀 Starting LangGraph workflow for topic: {topic}")
+    print(f"🔧 Parameters: level={level.value}, use_search={use_search}")
+    
+    # Create initial state
+    initial_state = {
+        "topic": topic,
+        "level": level,
+        "target_language": language_to_learn,
+        "original_langauge": learners_native_language,
+        "vocab_list": [],
+        "vocab_entries": [],
+        "search_context": search_context,  # Use the passed search context
+        "use_search": use_search,
+        "vocab_per_batch": vocab_per_batch,
+        "phrasal_verbs_per_batch": phrasal_verbs_per_batch,
+        "idioms_per_batch": idioms_per_batch
+    }
+    
+    print(f"🔧 Initial state: {initial_state}")
+    print(f"🔧 Graph type: {type(vocab_graph)}")
+    
+    # Run the graph
+    try:
+        import time
+        workflow_start = time.time()
+        
+        print(f"🚀 Invoking LangGraph workflow...")
+        final_state = vocab_graph.invoke(initial_state)
+        
+        workflow_time = time.time() - workflow_start
+        print(f"⏱️ LangGraph workflow completed in {workflow_time:.2f} seconds")
+        
+        print(f"🔧 Final state keys: {list(final_state.keys()) if final_state else 'None'}")
+        print(f"🔧 Vocab entries count: {len(final_state.get('vocab_entries', []))}")
+        
+        # Return vocabulary entries
+        return final_state.get("vocab_entries", [])
+        
+    except Exception as e:
+        print(f"❌ LangGraph workflow error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
