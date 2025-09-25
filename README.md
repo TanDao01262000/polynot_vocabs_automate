@@ -202,6 +202,27 @@ lsof -i :8001
 sudo chown -R $USER:$USER .
 ```
 
+## 🎯 Points Integration
+
+The API includes a comprehensive points system that rewards users for learning activities:
+
+### Points Features
+- **Vocabulary Generation**: Points for generating new vocabulary words (15-100 points based on level)
+- **Flashcard Review**: Points for completing flashcard sessions (22-95 points based on difficulty)
+- **Pronunciation Practice**: Points for pronunciation activities (10-40 points based on level)
+- **Social Integration**: Connects with social API for leaderboards and achievements
+
+### Points Calculation
+- **A1 Level**: Base 15 points + bonuses
+- **A2 Level**: Base 20 points + bonuses  
+- **B1 Level**: Base 25 points + bonuses
+- **B2 Level**: Base 30 points + bonuses
+- **C1 Level**: Base 40 points + bonuses
+
+### Documentation
+- **Points Integration Guide**: `docs/points/POINTS_INTEGRATION_GUIDE.md`
+- **Points Module**: `docs/points/points_integration.py`
+
 ## 📝 Available Endpoints
 
 ### Core API

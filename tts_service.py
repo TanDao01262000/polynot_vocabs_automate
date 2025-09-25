@@ -198,6 +198,10 @@ class TTSService:
     async def generate_tts(self, request: TTSRequest, user_id: str, authenticated_client=None) -> TTSResponse:
         """Generate TTS audio based on user's subscription"""
         try:
+            # Ensure user exists in profiles table
+            from vocab_api import ensure_user_exists
+            await ensure_user_exists(user_id)
+            
             # Check quota
             if not await self.check_tts_quota(user_id):
                 return TTSResponse(

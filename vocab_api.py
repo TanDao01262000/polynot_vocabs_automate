@@ -31,6 +31,9 @@ from pronunciation_service import pronunciation_service
 from voice_cloning_api import router as voice_cloning_router
 # from tts_api import router as tts_router  # Commented out due to path conflict
 
+# Import points integration
+from points_integration import vocab_points, flashcard_points
+
 # Initialize FastAPI app
 app = FastAPI(
     title="AI Vocabulary Generator API - Comprehensive",
@@ -1307,6 +1310,14 @@ async def generate_single_topic(
             use_search=request.use_search
         )
         
+        # Award points for vocabulary generation
+        points_result = vocab_points.award_vocab_generation_points(
+            user_name=current_user,
+            words_generated=result["total_generated"],
+            level=request.level.value,
+            session_duration=0  # Could be calculated from start/end time
+        )
+        
         return GenerateResponse(
             success=True,
             message=f"Generated vocabulary for topic '{request.topic}' at {request.level.value} level",
@@ -1316,7 +1327,8 @@ async def generate_single_topic(
                 "level": request.level.value,
                 "language_to_learn": request.language_to_learn,
                 "learners_native_language": request.learners_native_language,
-                "search_enabled": request.use_search
+                "search_enabled": request.use_search,
+                "points_awarded": points_result.get("points", 0) if points_result.get("success") else 0
             },
             generated_vocabulary=result["vocabulary"],
             total_generated=result["total_generated"],
@@ -1345,6 +1357,14 @@ async def generate_multiple_topics(request: GenerateMultipleRequest):
             topic_list_name=request.topic_list_name
         )
         
+        # Award points for vocabulary generation (multiple topics)
+        points_result = vocab_points.award_vocab_generation_points(
+            user_name="system",  # Multiple topics don't have a specific user
+            words_generated=result["total_generated"],
+            level=request.level.value,
+            session_duration=0
+        )
+        
         return GenerateResponse(
             success=True,
             message=f"Generated vocabulary for {len(request.topics)} topics at {request.level.value} level",
@@ -1353,7 +1373,8 @@ async def generate_multiple_topics(request: GenerateMultipleRequest):
                 "topics": request.topics,
                 "level": request.level.value,
                 "language_to_learn": request.language_to_learn,
-                "learners_native_language": request.learners_native_language
+                "learners_native_language": request.learners_native_language,
+                "points_awarded": points_result.get("points", 0) if points_result.get("success") else 0
             },
             generated_vocabulary=result["vocabulary"],
             total_generated=result["total_generated"],
@@ -1387,6 +1408,14 @@ async def generate_category(request: GenerateCategoryRequest):
             delay_seconds=request.delay_seconds
         )
         
+        # Award points for vocabulary generation (category)
+        points_result = vocab_points.award_vocab_generation_points(
+            user_name="system",  # Category generation doesn't have a specific user
+            words_generated=result["total_generated"],
+            level=request.level.value,
+            session_duration=0
+        )
+        
         return GenerateResponse(
             success=True,
             message=f"Generated vocabulary for category '{request.category}' at {request.level.value} level",
@@ -1395,7 +1424,8 @@ async def generate_category(request: GenerateCategoryRequest):
                 "category": request.category,
                 "level": request.level.value,
                 "language_to_learn": request.language_to_learn,
-                "learners_native_language": request.learners_native_language
+                "learners_native_language": request.learners_native_language,
+                "points_awarded": points_result.get("points", 0) if points_result.get("success") else 0
             },
             generated_vocabulary=result["vocabulary"],
             total_generated=result["total_generated"],
@@ -1861,6 +1891,28 @@ async def submit_flashcard_answer(
             request.vocab_entry_id = current_card["vocab_entry_id"]
         
         result = db.submit_flashcard_answer_advanced(session_id, request)
+        
+        # Check if session is completed and award points
+        if result.get("session_complete", False):
+            session = db.get_flashcard_session(session_id)
+            if session:
+                # Calculate difficulty based on session settings
+                difficulty = "medium"  # Default difficulty
+                if hasattr(request, 'difficulty') and request.difficulty:
+                    difficulty = request.difficulty.value.lower()
+                
+                # Award points for flashcard review
+                points_result = flashcard_points.award_flashcard_review_points(
+                    user_name=current_user,
+                    cards_reviewed=session.get("total_cards", 0),
+                    difficulty=difficulty,
+                    mastery_achieved=session.get("correct_answers", 0) >= session.get("total_cards", 0) * 0.8,
+                    streak_days=0  # Could be calculated from user's streak data
+                )
+                
+                # Add points info to result
+                result["points_awarded"] = points_result.get("points", 0) if points_result.get("success") else 0
+                result["points_success"] = points_result.get("success", False)
         
         return {
             "success": True,
@@ -2593,6 +2645,26 @@ async def generate_pronunciations(
     """Generate multiple pronunciation versions for a vocabulary entry"""
     try:
         response = await pronunciation_service.generate_pronunciations(request, current_user)
+        
+        # Award points for pronunciation practice
+        if response and response.success:
+            # Get vocabulary entry to determine level
+            vocab_result = db.client.table("vocab_entries").select("level").eq("id", request.vocab_entry_id).execute()
+            level = vocab_result.data[0]["level"] if vocab_result.data else "A2"
+            
+            # Award points for pronunciation practice
+            points_result = vocab_points.award_pronunciation_points(
+                user_name=current_user,
+                level=level,
+                practice_duration=1  # Assume 1 minute of practice per generation
+            )
+            
+            # Add points info to response
+            if hasattr(response, 'details'):
+                response.details = response.details or {}
+                response.details["points_awarded"] = points_result.get("points", 0) if points_result.get("success") else 0
+                response.details["points_success"] = points_result.get("success", False)
+        
         return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pronunciation generation failed: {str(e)}")
