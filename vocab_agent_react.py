@@ -47,12 +47,17 @@ class VocabState(TypedDict):
     
     # Generation results
     vocab_entries: List[VocabEntry]
-    search_context: str
+    filtered_entries: List[VocabEntry]
     
     # Validation and tracking
     validation_results: List[dict]
     generation_attempts: int
     max_attempts: int
+    
+    # Regeneration control
+    should_regenerate: bool
+    regeneration_count: int
+    max_regenerations: int
     
     # User preferences
     user_id: str
@@ -67,15 +72,149 @@ class VocabState(TypedDict):
 # =========== Tools for React Agent ===========
 
 @tool
+def filter_duplicates_tool(generated_entries: List[dict], topic: str, target_counts: dict, user_id: str = None, lookback_days: int = 5) -> dict:
+    """Filter out duplicate vocabulary entries and determine if regeneration is needed"""
+    try:
+        print(f"🔍 FILTER_DUPLICATES_TOOL: Starting duplicate filtering")
+        print(f"📊 Input: {len(generated_entries)} generated entries for topic: {topic}")
+        print(f"🎯 Target counts: {target_counts}")
+        print(f"👤 User ID: {user_id}, Lookback: {lookback_days} days")
+        
+        # Step 1: Get user's saved vocabulary from user_vocab_entries table
+        user_saved_words = set()
+        if user_id:
+            try:
+                from supabase_database import SupabaseVocabDatabase
+                db = SupabaseVocabDatabase()
+                
+                # Get user's saved vocabulary entries
+                user_saved_entries = db.get_user_saved_vocab_entries(user_id, show_hidden=False)
+                print(f"🔍 Found {len(user_saved_entries)} saved vocabulary entries for user")
+                
+                # Extract words from saved entries
+                for entry in user_saved_entries:
+                    word = entry.get('word', '').lower().strip()
+                    if word:
+                        user_saved_words.add(word)
+                
+                print(f"🔍 Built user saved words set: {len(user_saved_words)} unique words")
+                
+            except Exception as e:
+                print(f"⚠️ Error getting user saved vocabulary: {e}")
+                print("Continuing without user saved vocabulary filtering")
+        else:
+            print("🔍 No user_id provided, skipping user saved vocabulary filtering")
+        
+        # Step 2: Filter out user-saved duplicates
+        saved_filtered_entries = []
+        saved_duplicates_found = []
+        for entry in generated_entries:
+            word = entry.get('word', '').lower().strip()
+            
+            if word not in user_saved_words:
+                saved_filtered_entries.append(entry)
+            else:
+                saved_duplicates_found.append(word)
+        
+        print(f"🚫 User-saved duplicates found: {len(saved_duplicates_found)}")
+        if saved_duplicates_found:
+            print(f"   Saved Duplicates: {', '.join(saved_duplicates_found[:5])}{'...' if len(saved_duplicates_found) > 5 else ''}")
+        
+        # Step 3: Filter out user-seen duplicates (if user_id provided)
+        final_filtered_entries = saved_filtered_entries
+        user_duplicates_found = []
+        
+        if user_id:
+            print(f"👤 Checking user generation history for user: {user_id}")
+            try:
+                from vocab_api import get_user_seen_vocabularies
+                seen_words = get_user_seen_vocabularies(user_id, lookback_days)
+                print(f"👤 Found {len(seen_words)} words seen by user in last {lookback_days} days")
+                
+                if seen_words:
+                    user_filtered_entries = []
+                    for entry in saved_filtered_entries:
+                        word = entry.get('word', '').lower().strip()
+                        if word not in seen_words:
+                            user_filtered_entries.append(entry)
+                        else:
+                            user_duplicates_found.append(word)
+                    
+                    final_filtered_entries = user_filtered_entries
+                    print(f"🚫 User-seen duplicates found: {len(user_duplicates_found)}")
+                    if user_duplicates_found:
+                        print(f"   User Duplicates: {', '.join(user_duplicates_found[:5])}{'...' if len(user_duplicates_found) > 5 else ''}")
+                
+            except Exception as e:
+                print(f"⚠️ Error checking user generation history: {e}")
+                print("Continuing with saved-filtered entries only")
+        
+        # Count by type
+        vocab_count = len([e for e in final_filtered_entries if e.get('part_of_speech', '').lower() not in ['phrasal_verb', 'idiom']])
+        phrasal_count = len([e for e in final_filtered_entries if e.get('part_of_speech', '').lower() == 'phrasal_verb'])
+        idiom_count = len([e for e in final_filtered_entries if e.get('part_of_speech', '').lower() == 'idiom'])
+        
+        print(f"📊 Final filtered counts: {vocab_count} vocab, {phrasal_count} phrasal, {idiom_count} idioms")
+        
+        # Check if we have enough entries
+        target_vocab = target_counts.get('vocab_count', 0)
+        target_phrasal = target_counts.get('phrasal_verbs_count', 0)
+        target_idiom = target_counts.get('idioms_count', 0)
+        
+        has_enough = (
+            vocab_count >= target_vocab and
+            phrasal_count >= target_phrasal and
+            idiom_count >= target_idiom
+        )
+        
+        action = "stop" if has_enough else "regenerate"
+        print(f"✅ Decision: {action.upper()} - Has enough: {has_enough}")
+        print(f"   Need: {target_vocab} vocab, {target_phrasal} phrasal, {target_idiom} idioms")
+        print(f"   Have: {vocab_count} vocab, {phrasal_count} phrasal, {idiom_count} idioms")
+        
+        total_duplicates_removed = len(generated_entries) - len(final_filtered_entries)
+        print(f"📊 Total duplicates removed: {total_duplicates_removed} (Saved: {len(saved_duplicates_found)}, User-seen: {len(user_duplicates_found)})")
+        
+        return {
+            "filtered_entries": final_filtered_entries,
+            "counts": {
+                "vocabularies": vocab_count,
+                "phrasal_verbs": phrasal_count,
+                "idioms": idiom_count
+            },
+            "target_counts": target_counts,
+            "has_enough": has_enough,
+            "duplicates_removed": total_duplicates_removed,
+            "saved_duplicates_removed": len(saved_duplicates_found),
+            "user_duplicates_removed": len(user_duplicates_found),
+            "action": action
+        }
+        
+    except Exception as e:
+        print(f"❌ FILTER_DUPLICATES_TOOL ERROR: {str(e)}")
+        return {
+            "error": f"Filtering failed: {str(e)}",
+            "action": "regenerate"
+        }
+
+@tool
 def generate_vocabulary_tool(topic: str, level: str, target_language: str, original_language: str, 
-                           vocab_count: int = 10, phrasal_verbs_count: int = 0, idioms_count: int = 0) -> str:
+                           vocab_count: int = 10, phrasal_verbs_count: int = 0, idioms_count: int = 0) -> List[VocabEntry]:
     """Generate vocabulary entries for a given topic and level"""
     try:
-        from langchain_openai import ChatOpenAI
-        from langchain_core.prompts import ChatPromptTemplate
-        from langchain_core.output_parsers import JsonOutputParser
+        print(f"🎯 GENERATE_VOCABULARY_TOOL: Starting generation")
+        print(f"📝 Topic: {topic}, Level: {level}")
+        print(f"🌍 Languages: {target_language} -> {original_language}")
+        print(f"📊 Target counts: {vocab_count} vocab, {phrasal_verbs_count} phrasal, {idioms_count} idioms")
+        
+        # Apply 1.5x multiplier with buffer for post-processing
+        buffer_vocab = max(int(vocab_count * 1.5), vocab_count + 5)  # At least 1.5x or +5 buffer
+        buffer_phrasal = max(int(phrasal_verbs_count * 1.5), phrasal_verbs_count + 3) if phrasal_verbs_count > 0 else 0
+        buffer_idioms = max(int(idioms_count * 1.5), idioms_count + 3) if idioms_count > 0 else 0
+        
+        print(f"📊 Buffer counts: {buffer_vocab} vocab, {buffer_phrasal} phrasal, {buffer_idioms} idioms")
+        
         from pydantic import BaseModel, Field
-        from typing import List
         
         # Define structured output with simpler schema
         class VocabEntryData(BaseModel):
@@ -94,18 +233,19 @@ def generate_vocabulary_tool(topic: str, level: str, target_language: str, origi
         # Create structured LLM using function calling method
         structured_llm = llm.with_structured_output(VocabResponse, method="function_calling")
         
-        # Enhanced prompt for diversity and quality
-        prompt = f'''You are an expert {target_language} language teacher. Generate diverse, high-quality vocabulary for the topic "{topic}" at {level} level.
+        # Enhanced prompt with strict count requirements and buffer
+        prompt = f'''Generate {target_language} vocabulary for "{topic}" at {level} level.
 
-TOPIC: {topic}
-LEVEL: {level}
-TARGET LANGUAGE: {target_language}
-ORIGINAL LANGUAGE: {original_language}
+CRITICAL REQUIREMENT - READ THIS FIRST:
+You MUST generate EXACTLY {buffer_vocab} vocabulary words. Not {buffer_vocab-1}, not {buffer_vocab+1}, but EXACTLY {buffer_vocab}.
 
-GENERATION REQUIREMENTS:
-- Create {vocab_count} vocabulary words
-- Create {phrasal_verbs_count} phrasal verbs  
-- Create {idioms_count} idioms
+COUNT YOUR RESULTS:
+Before responding, count your vocabulary words. If you don't have exactly {buffer_vocab}, add more words or remove some.
+
+STRICT COUNT REQUIREMENTS:
+- Generate EXACTLY {buffer_vocab} vocabulary words (nouns, verbs, adjectives, adverbs)
+- Generate EXACTLY {buffer_phrasal} phrasal verbs/expressions
+- Generate EXACTLY {buffer_idioms} idioms/proverbs
 
 QUALITY REQUIREMENTS:
 - All words must be directly relevant to "{topic}"
@@ -115,6 +255,11 @@ QUALITY REQUIREMENTS:
 - Include clear, detailed definitions
 - Provide realistic example sentences
 - Ensure accurate translations
+
+VALIDATION CHECK:
+Before you respond, count your vocabulary words. You should have exactly {buffer_vocab} words.
+If you have fewer than {buffer_vocab}, add more words.
+If you have more than {buffer_vocab}, remove some words.
 
 For each entry, include:
 - word: the vocabulary word
@@ -126,13 +271,51 @@ For each entry, include:
 
 Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
         
-        result = structured_llm.invoke(prompt)
+        # Generate with count validation and retry logic
+        max_attempts = 3
+        attempt = 0
         
-        # Convert to VocabEntry objects
+        while attempt < max_attempts:
+            attempt += 1
+            print(f"🔄 GENERATE_VOCABULARY_TOOL: Attempt {attempt}/{max_attempts}")
+            
+            result = structured_llm.invoke(prompt)
+            
+            # Validate counts against buffer requirements
+            actual_vocab_count = len(result.vocabularies)
+            actual_phrasal_count = len(result.phrasal_verbs)
+            actual_idiom_count = len(result.idioms)
+            
+            print(f"📊 GENERATE_VOCABULARY_TOOL: Generated counts:")
+            print(f"   Vocabularies: {actual_vocab_count}/{buffer_vocab} (target: {vocab_count})")
+            print(f"   Phrasal verbs: {actual_phrasal_count}/{buffer_phrasal} (target: {phrasal_verbs_count})")
+            print(f"   Idioms: {actual_idiom_count}/{buffer_idioms} (target: {idioms_count})")
+            
+            # Check if counts match buffer requirements
+            counts_match = (
+                actual_vocab_count == buffer_vocab and
+                actual_phrasal_count == buffer_phrasal and
+                actual_idiom_count == buffer_idioms
+            )
+            
+            if counts_match:
+                print("✅ GENERATE_VOCABULARY_TOOL: All counts match buffer requirements!")
+                break
+            else:
+                print(f"⚠️ GENERATE_VOCABULARY_TOOL: Count mismatch detected. Attempt {attempt}/{max_attempts}")
+                if attempt < max_attempts:
+                    # Add specific retry instruction for buffer counts
+                    prompt += f"\n\nRETRY INSTRUCTION: Previous attempt generated {actual_vocab_count} vocabularies, {actual_phrasal_count} phrasal verbs, and {actual_idiom_count} idioms. You need exactly {buffer_vocab} vocabularies, {buffer_phrasal} phrasal verbs, and {buffer_idioms} idioms. Please count carefully and generate the exact numbers requested."
+                    print(f"🔄 GENERATE_VOCABULARY_TOOL: Added retry instruction to prompt")
+                else:
+                    print("❌ GENERATE_VOCABULARY_TOOL: Max attempts reached. Using generated results as-is.")
+        
+        # Convert to VocabEntry objects with post-processing to exact counts
         vocab_entries = []
         
-        # Process vocabularies
-        for vocab in result.vocabularies:
+        # Process vocabularies (trim to exact count)
+        vocab_list = result.vocabularies[:vocab_count]  # Take only the requested number
+        for vocab in vocab_list:
             entry = VocabEntry(
                 word=vocab.word,
                 definition=vocab.definition,
@@ -144,8 +327,9 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
             )
             vocab_entries.append(entry)
         
-        # Process phrasal verbs
-        for pv in result.phrasal_verbs:
+        # Process phrasal verbs (trim to exact count)
+        phrasal_list = result.phrasal_verbs[:phrasal_verbs_count]  # Take only the requested number
+        for pv in phrasal_list:
             entry = VocabEntry(
                 word=pv.word,
                 definition=pv.definition,
@@ -157,8 +341,9 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
             )
             vocab_entries.append(entry)
         
-        # Process idioms
-        for idiom in result.idioms:
+        # Process idioms (trim to exact count)
+        idiom_list = result.idioms[:idioms_count]  # Take only the requested number
+        for idiom in idiom_list:
             entry = VocabEntry(
                 word=idiom.word,
                 definition=idiom.definition,
@@ -170,10 +355,15 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
             )
             vocab_entries.append(entry)
         
-        return f"Successfully generated {len(vocab_entries)} vocabulary entries for {topic}. Words: {', '.join([entry.word for entry in vocab_entries[:5]])}"
+        print(f"✅ GENERATE_VOCABULARY_TOOL: Final result: {len(vocab_entries)} vocabulary entries")
+        print(f"🔍 GENERATE_VOCABULARY_TOOL: Post-processed counts - Vocabularies: {len(vocab_list)}, Phrasal verbs: {len(phrasal_list)}, Idioms: {len(idiom_list)}")
+        print(f"📊 GENERATE_VOCABULARY_TOOL: Original counts - Vocabularies: {len(result.vocabularies)}, Phrasal verbs: {len(result.phrasal_verbs)}, Idioms: {len(result.idioms)}")
+        
+        return vocab_entries
         
     except Exception as e:
-        return f"Error generating vocabulary: {str(e)}"
+        print(f"❌ GENERATE_VOCABULARY_TOOL ERROR: {str(e)}")
+        return []
 
 @tool
 def search_topic_context(topic: str, level: str = None, language: str = "English") -> str:
@@ -210,6 +400,7 @@ def create_vocab_react_agent():
     # Define tools
     tools = [
         generate_vocabulary_tool,
+        filter_duplicates_tool,
         search_topic_context
     ]
     
@@ -222,7 +413,274 @@ def create_vocab_react_agent():
     
     return agent
 
+def create_vocab_graph_with_regeneration():
+    """Create a LangGraph with regeneration loop for vocabulary generation"""
+    
+    # Create the graph
+    workflow = StateGraph(VocabState)
+    
+    # Add nodes
+    workflow.add_node("generate", generate_vocabulary_node)
+    workflow.add_node("filter", filter_duplicates_node)
+    workflow.add_node("decide", decide_regeneration_node)
+    
+    # Add edges
+    workflow.add_edge(START, "generate")
+    workflow.add_edge("generate", "filter")
+    workflow.add_edge("filter", "decide")
+    
+    # Add conditional edges for regeneration loop
+    workflow.add_conditional_edges(
+        "decide",
+        should_continue_generation,
+        {
+            "regenerate": "generate",
+            "stop": END
+        }
+    )
+    
+    # Compile the graph
+    return workflow.compile()
+
+def generate_vocabulary_node(state: VocabState) -> VocabState:
+    """Generate vocabulary entries"""
+    print(f"🎯 GENERATION_NODE: Starting generation (attempt {state.get('regeneration_count', 0) + 1})")
+    
+    # Use the generate_vocabulary_tool
+    vocab_result = generate_vocabulary_tool.invoke({
+        "topic": state["topic"],
+        "level": state["level"].value,
+        "target_language": state["target_language"],
+        "original_language": state["original_langauge"],
+        "vocab_count": state["vocab_per_batch"],
+        "phrasal_verbs_count": state["phrasal_verbs_per_batch"],
+        "idioms_count": state["idioms_per_batch"]
+    })
+    
+    # Update state with generated entries
+    state["vocab_entries"] = vocab_result
+    state["regeneration_count"] = state.get("regeneration_count", 0) + 1
+    
+    print(f"✅ GENERATION_NODE: Generated {len(vocab_result)} entries")
+    return state
+
+def filter_duplicates_node(state: VocabState) -> VocabState:
+    """Filter duplicates and validate counts"""
+    print(f"🔍 FILTER_NODE: Starting duplicate filtering")
+    
+    # Convert VocabEntry objects to dict format for filtering
+    generated_entries = []
+    for entry in state["vocab_entries"]:
+        generated_entries.append({
+            'word': entry.word,
+            'definition': entry.definition,
+            'example': entry.example,
+            'translation': entry.translation,
+            'example_translation': entry.example_translation,
+            'part_of_speech': entry.part_of_speech.value if entry.part_of_speech else '',
+            'level': entry.level.value if entry.level else ''
+        })
+    
+    # Use filter_duplicates_tool
+    filter_result = filter_duplicates_tool.invoke({
+        "generated_entries": generated_entries,
+        "topic": state["topic"],
+        "target_counts": {
+            "vocab_count": state["vocab_per_batch"],
+            "phrasal_verbs_count": state["phrasal_verbs_per_batch"],
+            "idioms_count": state["idioms_per_batch"]
+        },
+        "user_id": state["user_id"],
+        "lookback_days": 5
+    })
+    
+    # Convert filtered entries back to VocabEntry objects
+    filtered_entries = filter_result.get("filtered_entries", [])
+    vocab_entries = []
+    for entry_dict in filtered_entries:
+        entry = VocabEntry(
+            word=entry_dict['word'],
+            definition=entry_dict['definition'],
+            example=entry_dict['example'],
+            translation=entry_dict['translation'],
+            example_translation=entry_dict['example_translation'],
+            part_of_speech=PartOfSpeech(entry_dict['part_of_speech']),
+            level=CEFRLevel(entry_dict['level'])
+        )
+        vocab_entries.append(entry)
+    
+    # Update state
+    state["filtered_entries"] = vocab_entries
+    state["validation_results"] = [filter_result]
+    
+    print(f"✅ FILTER_NODE: Filtered to {len(vocab_entries)} entries")
+    return state
+
+def decide_regeneration_node(state: VocabState) -> VocabState:
+    """Decide whether to regenerate or stop"""
+    print(f"🤔 DECIDE_NODE: Evaluating regeneration decision")
+    
+    filter_result = state["validation_results"][-1]
+    has_enough = filter_result.get("has_enough", False)
+    max_regenerations = state.get("max_regenerations", 3)
+    regeneration_count = state.get("regeneration_count", 0)
+    
+    # Decide based on count and regeneration limit
+    if has_enough:
+        state["should_regenerate"] = False
+        print(f"✅ DECIDE_NODE: Has enough entries, stopping")
+    elif regeneration_count >= max_regenerations:
+        state["should_regenerate"] = False
+        print(f"⚠️ DECIDE_NODE: Max regenerations reached ({max_regenerations}), stopping")
+    else:
+        state["should_regenerate"] = True
+        print(f"🔄 DECIDE_NODE: Need more entries, will regenerate")
+    
+    return state
+
+def should_continue_generation(state: VocabState) -> str:
+    """Route function for conditional edges"""
+    if state.get("should_regenerate", False):
+        return "regenerate"
+    else:
+        return "stop"
+
 # =========== Main Generation Function ===========
+
+def generate_vocab_with_regeneration_loop(
+    topic: str,
+    level: CEFRLevel,
+    target_language: str = "English",
+    original_language: str = "Vietnamese",
+    vocab_per_batch: int = 10,
+    phrasal_verbs_per_batch: int = 0,
+    idioms_per_batch: int = 0,
+    user_id: str = "default_user",
+    ai_role: str = "Language Teacher",
+    max_regenerations: int = 3
+) -> VocabGenerationResponse:
+    """
+    Generate vocabulary using LangGraph with regeneration loop
+    """
+    try:
+        print(f"🚀 Starting vocabulary generation with regeneration loop for '{topic}'")
+        
+        # Create the graph
+        graph = create_vocab_graph_with_regeneration()
+        
+        # Create initial state
+        initial_state = {
+            "topic": topic,
+            "level": level,
+            "target_language": target_language,
+            "original_langauge": original_language,
+            "vocab_per_batch": vocab_per_batch,
+            "phrasal_verbs_per_batch": phrasal_verbs_per_batch,
+            "idioms_per_batch": idioms_per_batch,
+            "vocab_entries": [],
+            "filtered_entries": [],
+            "validation_results": [],
+            "generation_attempts": 0,
+            "max_attempts": 3,
+            "should_regenerate": True,
+            "regeneration_count": 0,
+            "max_regenerations": max_regenerations,
+            "user_id": user_id,
+            "ai_role": ai_role,
+            "messages": [],
+            "remaining_steps": 10
+        }
+        
+        # Run the graph
+        final_state = graph.invoke(initial_state)
+        
+        # Extract final results
+        final_entries = final_state.get("filtered_entries", [])
+        
+        # Separate entries by type
+        vocabularies = [entry for entry in final_entries if entry.part_of_speech != PartOfSpeech.PHRASAL_VERB and entry.part_of_speech != PartOfSpeech.IDIOM]
+        phrasal_verbs = [entry for entry in final_entries if entry.part_of_speech == PartOfSpeech.PHRASAL_VERB]
+        idioms = [entry for entry in final_entries if entry.part_of_speech == PartOfSpeech.IDIOM]
+        
+        print(f"✅ Final result: {len(vocabularies)} vocab, {len(phrasal_verbs)} phrasal, {len(idioms)} idioms")
+        print(f"🔄 Total regenerations: {final_state.get('regeneration_count', 0)}")
+        
+        # Final summary statistics (like vocab_agent.py does)
+        print(f"\n📊 FINAL SUMMARY:")
+        print(f"Topic: {topic}")
+        print(f"Level: {level.value}")
+        print(f"Target language: {target_language}")
+        print(f"Original language: {original_language}")
+        print(f"Total entries created: {len(final_entries)}")
+        print(f"Regenerations used: {final_state.get('regeneration_count', 0)}")
+        print(f"User ID: {user_id}")
+        print("✅ Generation completed successfully!")
+        
+        # Save generated vocabularies to database (like vocab_agent.py does)
+        if final_entries:
+            print(f"\n💾 Saving {len(final_entries)} new entries to database...")
+            try:
+                from supabase_database import SupabaseVocabDatabase
+                db = SupabaseVocabDatabase()
+                
+                # Save to vocab_entries table
+                db.insert_vocab_entries(
+                    entries=final_entries,
+                    topic_name=topic,
+                    category_name="general",  # Default category
+                    target_language=target_language,
+                    original_language=original_language
+                )
+                print("✅ Saved successfully to vocab_entries table!")
+                
+                # Verify the count after saving (like vocab_agent.py does)
+                try:
+                    saved_entries = db.get_vocab_entries(topic_name=topic, category_name="general")
+                    print(f"📊 Total entries in database for '{topic}': {len(saved_entries)}")
+                except Exception as e:
+                    print(f"⚠️ Error verifying saved entries count: {e}")
+                
+            except Exception as e:
+                print(f"⚠️ Error saving to vocab_entries: {e}")
+        
+        # Track generated vocabularies for user (like vocab_api.py does)
+        if user_id and final_entries:
+            print(f"📊 Tracking {len(final_entries)} generated vocabularies for user...")
+            try:
+                from vocab_api import track_generated_vocabularies
+                import uuid
+                
+                session_id = str(uuid.uuid4())
+                track_generated_vocabularies(user_id, final_entries, topic, level, session_id)
+                print("✅ Tracked successfully in user_generation_history!")
+                
+            except Exception as e:
+                print(f"⚠️ Error tracking generation history: {e}")
+        
+        # Create response with statistics (like vocab_agent.py does)
+        response = VocabGenerationResponse(
+            vocabularies=vocabularies,
+            phrasal_verbs=phrasal_verbs,
+            idioms=idioms
+        )
+        
+        # Print statistics (since we can't extend the Pydantic model)
+        print(f"\n📊 RESPONSE STATISTICS:")
+        print(f"   Total entries created: {len(final_entries)}")
+        print(f"   Regenerations used: {final_state.get('regeneration_count', 0)}")
+        print(f"   Topic: {topic}")
+        print(f"   Level: {level.value}")
+        print(f"   User ID: {user_id}")
+        
+        return response
+        
+    except Exception as e:
+        print(f"❌ Regeneration loop error: {e}")
+        return VocabGenerationResponse(
+            vocabularies=[],
+            phrasal_verbs=[],
+            idioms=[]
+        )
 
 def generate_vocab_with_react_agent(
     topic: str,
@@ -233,8 +691,7 @@ def generate_vocab_with_react_agent(
     phrasal_verbs_per_batch: int = 0,
     idioms_per_batch: int = 0,
     user_id: str = "default_user",
-    ai_role: str = "Language Teacher",
-    avoid_words: list = None
+    ai_role: str = "Language Teacher"
 ) -> VocabGenerationResponse:
     """
     Generate vocabulary using react agent approach
@@ -242,47 +699,7 @@ def generate_vocab_with_react_agent(
     try:
         print(f"🚀 Starting react agent vocabulary generation for '{topic}'")
         
-        # Create react agent
-        agent = create_vocab_react_agent()
-        
-        # Create detailed system message
-        system_message = f"""You are a {ai_role} helping to generate diverse, high-quality vocabulary for language learning.
-
-Your task:
-1. Generate vocabulary for topic: {topic}
-2. Level: {level.value}
-3. Target language: {target_language}
-4. Original language: {original_language}
-5. Generate exactly {vocab_per_batch} vocabulary words, {phrasal_verbs_per_batch} phrasal verbs, {idioms_per_batch} idioms
-
-IMPORTANT INSTRUCTIONS:
-- Use the generate_vocabulary_tool to create the vocabulary
-- Ensure all words are relevant to the topic "{topic}"
-- Make sure the vocabulary is appropriate for {level.value} level
-- Generate diverse, high-quality words (not generic or repetitive)
-- Provide clear definitions and practical examples
-- Include accurate translations
-
-Use the available tools to complete this task efficiently."""
-        
-        # Create human message
-        human_message = f"Please generate {vocab_per_batch} vocabulary words for the topic '{topic}' at {level.value} level in {target_language} with translations to {original_language}. Make sure the words are diverse and high-quality."
-        
-        # Run the agent
-        result = agent.invoke({
-            "messages": [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": human_message}
-            ]
-        })
-        
-        print(f"✅ React agent completed vocabulary generation")
-        
-        # The react agent doesn't store vocab entries in state, so we need to extract from tool calls
-        # Let's generate the vocabulary directly using our tool
-        print(f"🔧 Extracting vocabulary from react agent response...")
-        
-        # Generate vocabulary directly using our tool
+        # Use the generate_vocabulary_tool directly - it already has all the logic we need
         vocab_result = generate_vocabulary_tool.invoke({
             "topic": topic,
             "level": level.value,
@@ -293,187 +710,52 @@ Use the available tools to complete this task efficiently."""
             "idioms_count": idioms_per_batch
         })
         
-        print(f"📊 Tool result: {vocab_result}")
+        print(f"📊 Tool result: {len(vocab_result)} vocabulary entries")
         
-        # The tool is generating real vocabulary, but we need to extract it properly
-        # Let's call the tool directly to get the actual vocabulary entries
-        print(f"🔧 Generating actual vocabulary entries...")
+        # Convert VocabEntry objects to dict format for filtering
+        generated_entries = []
+        for entry in vocab_result:
+            generated_entries.append({
+                'word': entry.word,
+                'definition': entry.definition,
+                'example': entry.example,
+                'translation': entry.translation,
+                'example_translation': entry.example_translation,
+                'part_of_speech': entry.part_of_speech.value if entry.part_of_speech else '',
+                'level': entry.level.value if entry.level else ''
+            })
         
-        # Create a temporary tool instance to get the actual entries
-        from langchain_openai import ChatOpenAI
-        from pydantic import BaseModel, Field
-        from typing import List
+        # Use filter_duplicates_tool to filter out duplicates
+        filter_result = filter_duplicates_tool.invoke({
+            "generated_entries": generated_entries,
+            "topic": topic,
+            "target_counts": {
+                "vocab_count": vocab_per_batch,
+                "phrasal_verbs_count": phrasal_verbs_per_batch,
+                "idioms_count": idioms_per_batch
+            },
+            "user_id": user_id,
+            "lookback_days": 5
+        })
         
-        # Define structured output
-        class VocabEntryData(BaseModel):
-            word: str = Field(description="The vocabulary word")
-            definition: str = Field(description="Definition of the word")
-            example: str = Field(description="Example sentence")
-            translation: str = Field(description="Translation to original language")
-            example_translation: str = Field(description="Translation of the example sentence")
-            part_of_speech: str = Field(description="Part of speech (noun, verb, adjective, etc.)")
+        print(f"🔍 Filter result: {filter_result}")
         
-        class VocabResponse(BaseModel):
-            vocabularies: List[VocabEntryData] = Field(description="List of vocabulary entries")
-            phrasal_verbs: List[VocabEntryData] = Field(description="List of phrasal verbs")
-            idioms: List[VocabEntryData] = Field(description="List of idioms")
-        
-        # Create structured LLM
-        structured_llm = llm.with_structured_output(VocabResponse, method="function_calling")
-        
-        # Enhanced prompt for diversity and quality with randomization
-        import random
-        import time
-        
-        # Add randomization elements to encourage diversity
-        diversity_techniques = [
-            "focus on specific aspects and subcategories",
-            "explore different perspectives and use cases", 
-            "include both common and specialized terms",
-            "cover various contexts and applications",
-            "emphasize practical and everyday usage",
-            "highlight modern and contemporary terms"
-        ]
-        
-        selected_technique = random.choice(diversity_techniques)
-        random_seed = int(time.time() * 1000) % 1000
-        
-        # Create diverse prompt variations
-        prompt_variations = [
-            f'''You are an expert {target_language} language teacher. Generate diverse, high-quality vocabulary for the topic "{topic}" at {level.value} level.
-
-TOPIC: {topic}
-LEVEL: {level.value}
-TARGET LANGUAGE: {target_language}
-ORIGINAL LANGUAGE: {original_language}
-DIVERSITY FOCUS: {selected_technique}
-
-GENERATION REQUIREMENTS:
-- Create {vocab_per_batch} vocabulary words
-- Create {phrasal_verbs_per_batch} phrasal verbs  
-- Create {idioms_per_batch} idioms
-
-DIVERSITY REQUIREMENTS:
-- AVOID common, obvious words that always appear for this topic
-- Focus on {selected_technique}
-- Generate unique, less common but still relevant vocabulary
-- Ensure each word is distinct and different from typical lists
-- Include both basic and intermediate terms
-- Cover different aspects of the topic
-
-QUALITY REQUIREMENTS:
-- All words must be directly relevant to "{topic}"
-- Ensure appropriate difficulty for {level.value} level
-- Generate diverse, engaging, and useful vocabulary
-- Avoid repetition and generic terms
-- Include clear, detailed definitions
-- Provide realistic example sentences
-- Ensure accurate translations
-
-For each entry, include:
-- word: the vocabulary word
-- definition: clear definition in {target_language}
-- example: practical example sentence in {target_language}
-- translation: accurate translation to {original_language}
-- example_translation: translation of the example sentence to {original_language}
-- part_of_speech: part of speech (noun, verb, adjective, adverb, etc.)
-
-Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.''',
-            
-            f'''You are a creative {target_language} language teacher specializing in diverse vocabulary generation.
-
-TOPIC: {topic}
-LEVEL: {level.value}
-TARGET LANGUAGE: {target_language}
-ORIGINAL LANGUAGE: {original_language}
-
-CREATIVE CHALLENGE:
-Generate vocabulary that is:
-- Relevant to "{topic}" but NOT the most obvious choices
-- Appropriate for {level.value} level learners
-- Diverse and varied in their focus areas
-- Useful and practical for real-world use
-
-GENERATION REQUIREMENTS:
-- Create {vocab_per_batch} vocabulary words
-- Create {phrasal_verbs_per_batch} phrasal verbs  
-- Create {idioms_per_batch} idioms
-
-AVOID these common words for {topic}: computer, internet, software, device, application, system, data, network, digital, online
-
-Instead, focus on:
-- Specific tools, processes, or concepts
-- Action words and descriptive terms
-- Modern terminology and trends
-- Practical applications and uses
-- Phrasal verbs related to technology actions
-- Idioms and expressions used in tech contexts
-
-For each entry, include:
-- word: the vocabulary word
-- definition: clear definition in {target_language}
-- example: practical example sentence in {target_language}
-- translation: accurate translation to {original_language}
-- example_translation: translation of the example sentence to {original_language}
-- part_of_speech: part of speech (noun, verb, adjective, adverb, etc.)
-
-Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
-        ]
-        
-        # Select prompt variation based on random seed
-        prompt = prompt_variations[random_seed % len(prompt_variations)]
-        
-        # Add avoid_words to prompt if provided
-        if avoid_words and len(avoid_words) > 0:
-            avoid_list = ", ".join(avoid_words)
-            prompt += f"\n\nIMPORTANT: AVOID these words that were already generated: {avoid_list}"
-            prompt += f"\nGenerate completely different vocabulary that doesn't overlap with these words."
-        
-        result = structured_llm.invoke(prompt)
-        
-        # Convert to VocabEntry objects
+        # Convert filtered entries back to VocabEntry objects
+        filtered_entries = filter_result.get("filtered_entries", [])
         vocab_entries = []
-        
-        # Process vocabularies
-        for vocab in result.vocabularies:
+        for entry_dict in filtered_entries:
             entry = VocabEntry(
-                word=vocab.word,
-                definition=vocab.definition,
-                example=vocab.example,
-                translation=vocab.translation,
-                example_translation=vocab.example_translation,
-                part_of_speech=PartOfSpeech(vocab.part_of_speech),
-                level=level
+                word=entry_dict['word'],
+                definition=entry_dict['definition'],
+                example=entry_dict['example'],
+                translation=entry_dict['translation'],
+                example_translation=entry_dict['example_translation'],
+                part_of_speech=PartOfSpeech(entry_dict['part_of_speech']),
+                level=CEFRLevel(entry_dict['level'])
             )
             vocab_entries.append(entry)
         
-        # Process phrasal verbs
-        for pv in result.phrasal_verbs:
-            entry = VocabEntry(
-                word=pv.word,
-                definition=pv.definition,
-                example=pv.example,
-                translation=pv.translation,
-                example_translation=pv.example_translation,
-                part_of_speech=PartOfSpeech('phrasal_verb'),
-                level=level
-            )
-            vocab_entries.append(entry)
-        
-        # Process idioms
-        for idiom in result.idioms:
-            entry = VocabEntry(
-                word=idiom.word,
-                definition=idiom.definition,
-                example=idiom.example,
-                translation=idiom.translation,
-                example_translation=idiom.example_translation,
-                part_of_speech=PartOfSpeech('idiom'),
-                level=level
-            )
-            vocab_entries.append(entry)
-        
-        print(f"✅ Generated {len(vocab_entries)} actual vocabulary entries")
+        print(f"✅ Generated {len(vocab_entries)} actual vocabulary entries after filtering")
         
         # Separate entries by type
         vocabularies = [entry for entry in vocab_entries if entry.part_of_speech != PartOfSpeech.PHRASAL_VERB and entry.part_of_speech != PartOfSpeech.IDIOM]
@@ -524,17 +806,3 @@ def generate_vocab(
         user_id=user_id,
         ai_role=ai_role
     )
-
-# =========== Export Functions ===========
-
-def get_topic_list_export():
-    """Export topic list function"""
-    return get_topic_list()
-
-def get_categories_export():
-    """Export categories function"""
-    return get_categories()
-
-def get_topics_by_category_export(category: str):
-    """Export topics by category function"""
-    return get_topics_by_category(category)

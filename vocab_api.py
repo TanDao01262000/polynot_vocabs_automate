@@ -57,8 +57,8 @@ db = SupabaseVocabDatabase()
 
 # =========== User Vocabulary Tracking Functions ===========
 
-def get_user_seen_vocabularies(user_id: str, days_lookback: int = 30) -> set:
-    """Get vocabulary words that user has recently seen/generated"""
+def get_user_seen_vocabularies(user_id: str, days_lookback: int = 5) -> set:
+    """Get vocabulary words that user has recently seen/generated from generation history only"""
     try:
         from datetime import datetime, timedelta
         
@@ -66,20 +66,6 @@ def get_user_seen_vocabularies(user_id: str, days_lookback: int = 30) -> set:
         cutoff_date = datetime.now() - timedelta(days=days_lookback)
         
         seen_words = set()
-        
-        # Get words from user's saved vocabulary
-        try:
-            saved_result = db.client.table("user_vocab_entries").select("vocab_entry_id").eq("user_id", user_id).execute()
-            if saved_result.data:
-                # Get the actual words from vocab_entries
-                vocab_ids = [item["vocab_entry_id"] for item in saved_result.data]
-                if vocab_ids:
-                    vocab_result = db.client.table("vocab_entries").select("word").in_("id", vocab_ids).execute()
-                    if vocab_result.data:
-                        for item in vocab_result.data:
-                            seen_words.add(item["word"].lower())
-        except Exception as e:
-            print(f"⚠️ Error getting saved vocabularies: {e}")
         
         # Get words from generation history (if table exists)
         try:
@@ -97,7 +83,7 @@ def get_user_seen_vocabularies(user_id: str, days_lookback: int = 30) -> set:
         print(f"Error getting user seen vocabularies: {e}")
         return set()
 
-def filter_user_seen_duplicates(entries: list, user_id: str, lookback_days: int = 30) -> list:
+def filter_user_seen_duplicates(entries: list, user_id: str, lookback_days: int = 5) -> list:
     """Filter out vocabulary entries that user has recently seen"""
     if not user_id:
         return entries
@@ -287,7 +273,6 @@ class GenerateSingleRequest(BaseModel):
     delay_seconds: int = 3
     save_topic_list: bool = False
     topic_list_name: Optional[str] = None
-    use_search: bool = False  # NEW: Enable search for materials before generation
 
 class GenerateMultipleRequest(BaseModel):
     topics: List[str]
@@ -300,7 +285,6 @@ class GenerateMultipleRequest(BaseModel):
     delay_seconds: int = 3
     save_topic_list: bool = False
     topic_list_name: Optional[str] = None
-    use_search: bool = False  # NEW: Enable search for materials before generation
 
 class GenerateCategoryRequest(BaseModel):
     category: str
@@ -311,7 +295,6 @@ class GenerateCategoryRequest(BaseModel):
     phrasal_verbs_per_batch: int = 5
     idioms_per_batch: int = 5
     delay_seconds: int = 3
-    use_search: bool = False  # NEW: Enable search for materials before generation
 
 class VocabEntryResponse(BaseModel):
     id: str  # Unique identifier for frontend
@@ -336,7 +319,6 @@ class GenerateResponse(BaseModel):
     total_generated: int
     new_entries_saved: int
     duplicates_found: int
-    search_context: Optional[dict] = None  # NEW: Include search context if used
 
 class TopicListResponse(BaseModel):
     topics: List[str]
@@ -737,7 +719,6 @@ def generate_single_topic_sync(
     save_topic_list: bool,
     topic_list_name: Optional[str],
     user_id: Optional[str] = None,
-    use_search: bool = False
 ):
     """Generate vocabulary for a single topic synchronously"""
     try:
@@ -745,60 +726,18 @@ def generate_single_topic_sync(
         
         # Import here to avoid circular imports
         from vocab_agent_react import generate_vocab_with_react_agent
-        from vocab_agent import db, filter_duplicates, validate_topic_relevance, get_existing_combinations_for_topic, search_for_topic_context
+        from vocab_agent import db, filter_duplicates, validate_topic_relevance, get_existing_combinations_for_topic
         
-        # NEW: Search for materials if requested (using vocab_agent's Tavily integration)
-        search_context_text = ""
-        if use_search:
-            print(f"\n{'='*60}")
-            print(f"🔍 SEARCH INTEGRATION ACTIVATED (via vocab_agent)")
-            print(f"📋 Search Parameters:")
-            print(f"   Topic: {topic}")
-            print(f"   Level: {level.value}")
-            print(f"   Language: {language_to_learn}")
-            print(f"{'='*60}")
-            
-            search_context_text = search_for_topic_context(topic, level.value, language_to_learn)
-            
-            if search_context_text:
-                print(f"\n🎉 SEARCH INTEGRATION SUCCESS!")
-                print(f"📊 Summary:")
-                print(f"   📄 Context length: {len(search_context_text)} chars")
-                print(f"   🌐 Will enhance AI prompt with real-world context")
-                
-                # Log context preview for debugging
-                context_preview = search_context_text[:300] + "..." if len(search_context_text) > 300 else search_context_text
-                print(f"   📝 Context preview: {context_preview}")
-                    
-            else:
-                print(f"\n❌ SEARCH INTEGRATION FAILED!")
-                print(f"💥 No context found or search unavailable")
-                print(f"🔄 Proceeding with standard generation...")
-                
-        else:
-            print(f"\n📚 STANDARD GENERATION (search disabled)")
-            print(f"💡 To enable search, set use_search=true in request")
+        # Direct vocabulary generation (search functionality removed)
+        print(f"\n📚 STANDARD GENERATION")
         
         # Get existing combinations
         existing_combinations = get_existing_combinations_for_topic(topic)
         print(f"Found {len(existing_combinations)} existing combinations")
         
-        # Build enhanced prompt with search context FIRST
+        # Build enhanced prompt for direct generation
         base_prompt = f'''You are an expert {language_to_learn} language teacher creating engaging vocabulary content for {topic}.'''
-        
-        if search_context_text:
-            print(f"\n🎯 ENHANCING AI PROMPT WITH SEARCH CONTEXT")
-            print(f"📏 Adding {len(search_context_text[:1200])} characters of context")
-            print(f"🧠 AI will use real-world materials for better vocabulary")
-            
-            base_prompt += f'''
-
-IMPORTANT CONTEXT - Use this information to generate more relevant vocabulary:
-{search_context_text[:1200]}
-
-Based on the above real-world materials, generate vocabulary that reflects current usage and terminology from these sources.'''
-        else:
-            print(f"\n📝 STANDARD AI PROMPT (no search context)")
+        print(f"\n📝 STANDARD AI PROMPT")
 
         prompt = f'''{base_prompt}
 
@@ -837,20 +776,13 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
         print(f"📋 Parameters:")
         print(f"   Topic: {topic}")
         print(f"   Level: {level.value}")
-        print(f"   Use Search: {use_search}")
         print(f"   Target: {vocab_per_batch} vocab + {phrasal_verbs_per_batch} phrasal + {idioms_per_batch} idioms = {vocab_per_batch + phrasal_verbs_per_batch + idioms_per_batch} total")
         
         # Calculate target total
         target_total = vocab_per_batch + phrasal_verbs_per_batch + idioms_per_batch
         
-        # STEP 1: Search ONCE (if enabled)
-        search_context = ""
-        if use_search:
-            print(f"\n🔍 STEP 1: Searching for context (ONCE)")
-            search_context = search_for_topic_context(topic, level.value, language_to_learn)
-            print(f"✅ Search completed: {len(search_context)} characters of context")
-        else:
-            print(f"\n🔍 STEP 1: Skipping search (use_search=False)")
+        # STEP 1: Direct generation (search removed)
+        print(f"\n🔍 STEP 1: Direct vocabulary generation")
         
         # STEP 2: Pre-filter - check what already exists
         print(f"\n🔍 STEP 2: Pre-filtering - checking existing entries")
@@ -910,7 +842,6 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
                 "total_generated": 0,
                 "new_entries_saved": 0,
                 "duplicates_found": 0,
-                "search_context": {"context": "", "used": use_search} if use_search else None
             }
         
         # No post-processing needed - filtering is done during generation
@@ -984,7 +915,6 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
             "total_generated": len(response_entries),
             "new_entries_saved": len(filtered_entries),  # Count of new entries saved to vocab_entries
             "duplicates_found": len(response_entries) - len(filtered_entries),
-            "search_context": {"context": search_context_text, "used": bool(search_context_text)} if use_search else None
         }
             
     except Exception as e:
@@ -1307,7 +1237,6 @@ async def generate_single_topic(
             save_topic_list=request.save_topic_list,
             topic_list_name=request.topic_list_name,
             user_id=current_user,
-            use_search=request.use_search
         )
         
         # Award points for vocabulary generation
@@ -1327,14 +1256,12 @@ async def generate_single_topic(
                 "level": request.level.value,
                 "language_to_learn": request.language_to_learn,
                 "learners_native_language": request.learners_native_language,
-                "search_enabled": request.use_search,
                 "points_awarded": points_result.get("points", 0) if points_result.get("success") else 0
             },
             generated_vocabulary=result["vocabulary"],
             total_generated=result["total_generated"],
             new_entries_saved=result["new_entries_saved"],
             duplicates_found=result["duplicates_found"],
-            search_context=result.get("search_context")
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")

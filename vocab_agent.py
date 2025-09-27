@@ -50,8 +50,6 @@ class State(TypedDict):
 	original_langauge: str
 	vocab_list: list[str]
 	vocab_entries: list[VocabEntry]
-	search_context: str  # Add search context to state
-	use_search: bool     # Add search flag to state
 	vocab_per_batch: int  # Add batch parameters
 	phrasal_verbs_per_batch: int
 	idioms_per_batch: int
@@ -151,7 +149,6 @@ def run_continuous_vocab_generation(
     delay_seconds: int = 3,
     save_topic_list: bool = False,
     topic_list_name: str = None,
-    use_search: bool = False
 ):
     """
     Run continuous vocabulary generation using LangGraph workflow
@@ -234,72 +231,83 @@ def run_continuous_vocab_generation(
             existing_combinations = get_existing_combinations_for_topic(current_topic, category)
             print(f"Found {len(existing_combinations)} existing combinations in database")
             
-            # Search for topic context if enabled
-            search_context = ""
-            if use_search:
-                print(f"🔍 Searching for context about '{current_topic}'...")
-                search_context = search_for_topic_context(current_topic, level.value, language_to_learn)
-                if search_context:
-                    print(f"✅ Found search context: {len(search_context)} characters")
-                else:
-                    print("⚠️ No search context found")
+            # Direct generation with 1.5x multiplier and retry logic
+            # Apply 1.5x multiplier to ensure we have enough entries after filtering
+            target_vocab = int(vocab_per_batch * 1.5)
+            target_phrasal = int(phrasal_verbs_per_batch * 1.5)
+            target_idioms = int(idioms_per_batch * 1.5)
             
-            # Create enhanced prompt with explicit search context usage
-            if search_context:
-                print(f"🎯 Creating CONTEXT-DRIVEN prompt with LangGraph agent results")
-                prompt = f'''You are an expert {language_to_learn} language teacher. A search agent has provided you with real-world information about {current_topic}. You must create vocabulary based SPECIFICALLY on this researched information.
+            print(f"🔧 Creating STANDARD prompt with 1.5x multiplier")
+            print(f"📊 Requesting: {target_vocab} vocab, {target_phrasal} phrasal, {target_idioms} idioms")
+            print(f"📊 Target after filtering: {vocab_per_batch} vocab, {phrasal_verbs_per_batch} phrasal, {idioms_per_batch} idioms")
+            
+            prompt = f'''You are an expert {language_to_learn} language teacher creating engaging vocabulary content for {topic}.
 
-RESEARCHED CONTEXT (from LangGraph search agent):
-{search_context}
+STRICT COUNT REQUIREMENTS:
+- Generate EXACTLY {target_vocab} {language_to_learn} vocabulary words (nouns, verbs, adjectives, adverbs)
+- Generate EXACTLY {target_phrasal} {language_to_learn} phrasal verbs/expressions  
+- Generate EXACTLY {target_idioms} {language_to_learn} idioms/proverbs
 
-CRITICAL INSTRUCTIONS:
-- ANALYZE the researched context above and extract key vocabulary, terms, and concepts
-- Generate vocabulary that DIRECTLY relates to the specific information in the context
-- Use the actual terminology, concepts, and language patterns from the research
-- DO NOT generate generic vocabulary - base everything on the provided research
-- The vocabulary should reflect the current, real-world usage as found in the research
-
-Generate {language_to_learn} vocabulary for CEFR level {level.value} using the research context:
-
-1. {vocab_per_batch} vocabulary words (extract specific terms from the research)
-2. {phrasal_verbs_per_batch} phrasal verbs/expressions (from the researched material)
-3. {idioms_per_batch} idioms/expressions (related to the research findings)
-
-MANDATORY REQUIREMENTS:
-- EVERY word must be traceable to the research context above
-- Include clear definitions in {language_to_learn}
-- Provide example sentences in {language_to_learn} using the researched concepts
-- Translate examples to {learners_native_language}
-- Ensure {level.value} difficulty level
-- Make vocabulary choices that reflect the specific research findings'''
-            else:
-                print(f"🔧 Creating STANDARD prompt (no search context)")
-                prompt = f'''You are an expert {language_to_learn} language teacher creating engaging vocabulary content for {current_topic}.
-
-Generate diverse and interesting {language_to_learn} vocabulary for CEFR level {level.value}:
-
-1. {vocab_per_batch} {language_to_learn} vocabulary words (nouns, verbs, adjectives, adverbs)
-2. {phrasal_verbs_per_batch} {language_to_learn} phrasal verbs/expressions  
-3. {idioms_per_batch} {language_to_learn} idioms/proverbs
-
-Requirements:
-- All words must be relevant to "{current_topic}"
+QUALITY REQUIREMENTS:
+- All words must be relevant to "{topic}"
 - Include clear definitions in {language_to_learn} (the target learning language)
 - Provide example sentences in {language_to_learn}
 - Translate examples to {learners_native_language}
 - Ensure appropriate difficulty for {level.value} level
 - Avoid generic words not specific to the topic
+- Generate diverse, engaging, and useful vocabulary
+
+CRITICAL VALIDATION:
+- You MUST generate exactly the specified number of items in each category
+- Count your results carefully before responding
+- If you don't have the exact count, retry and generate more
+- Do not generate more or fewer than requested
 
 Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
 
             try:
-                # Generate vocabulary using structured output
-                res = structured_llm.invoke(prompt)
+                # Generate vocabulary using structured output with count validation
+                max_attempts = 3
+                attempt = 0
+                
+                while attempt < max_attempts:
+                    attempt += 1
+                    print(f"🔄 Generation attempt {attempt}/{max_attempts}")
+                    
+                    res = structured_llm.invoke(prompt)
+                    
+                    # Validate counts against 1.5x targets
+                    vocab_count = len(res.vocabularies)
+                    phrasal_count = len(res.phrasal_verbs)
+                    idiom_count = len(res.idioms)
+                    
+                    print(f"📊 Generated counts:")
+                    print(f"   Vocabularies: {vocab_count}/{target_vocab} (target: {vocab_per_batch})")
+                    print(f"   Phrasal verbs: {phrasal_count}/{target_phrasal} (target: {phrasal_verbs_per_batch})")
+                    print(f"   Idioms: {idiom_count}/{target_idioms} (target: {idioms_per_batch})")
+                    
+                    # Check if counts match 1.5x requirements
+                    counts_match = (
+                        vocab_count == target_vocab and
+                        phrasal_count == target_phrasal and
+                        idiom_count == target_idioms
+                    )
+                    
+                    if counts_match:
+                        print("✅ All counts match requirements!")
+                        break
+                    else:
+                        print(f"⚠️ Count mismatch detected. Attempt {attempt}/{max_attempts}")
+                        if attempt < max_attempts:
+                            # Add more specific instructions for retry
+                            prompt += f"\n\nRETRY INSTRUCTION: Previous attempt generated {vocab_count} vocabularies, {phrasal_count} phrasal verbs, and {idiom_count} idioms. You need exactly {target_vocab} vocabularies, {target_phrasal} phrasal verbs, and {target_idioms} idioms. Please count carefully and generate the exact numbers requested."
+                        else:
+                            print("❌ Max attempts reached. Using generated results as-is.")
                 
                 # Combine all entries
                 all_entries = res.vocabularies + res.phrasal_verbs + res.idioms
                 
-                print(f"Generated:")
+                print(f"Final generated counts:")
                 print(f"- {len(res.vocabularies)} vocabularies")
                 print(f"- {len(res.phrasal_verbs)} phrasal verbs")
                 print(f"- {len(res.idioms)} idioms")
@@ -315,15 +323,37 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
                     pos = entry.part_of_speech.value if entry.part_of_speech else "unknown"
                     print(f"  {i+1}. {entry.word} ({pos}): {entry.definition}")
                 
-                # Filter out duplicates
+                # Filter out duplicates and limit to requested counts
                 filtered_entries = filter_duplicates(relevant_entries, existing_combinations)
                 
-                if filtered_entries:
-                    print(f"\nSaving {len(filtered_entries)} new entries to database...")
+                # Limit to requested counts (take first N of each type)
+                final_entries = []
+                vocab_added = 0
+                phrasal_added = 0
+                idiom_added = 0
+                
+                for entry in filtered_entries:
+                    if entry.part_of_speech.value == 'phrasal_verb' and phrasal_added < phrasal_verbs_per_batch:
+                        final_entries.append(entry)
+                        phrasal_added += 1
+                    elif entry.part_of_speech.value == 'idiom' and idiom_added < idioms_per_batch:
+                        final_entries.append(entry)
+                        idiom_added += 1
+                    elif entry.part_of_speech.value not in ['phrasal_verb', 'idiom'] and vocab_added < vocab_per_batch:
+                        final_entries.append(entry)
+                        vocab_added += 1
+                
+                print(f"\n📊 Final counts after filtering:")
+                print(f"   Vocabularies: {vocab_added}/{vocab_per_batch}")
+                print(f"   Phrasal verbs: {phrasal_added}/{phrasal_verbs_per_batch}")
+                print(f"   Idioms: {idiom_added}/{idioms_per_batch}")
+                
+                if final_entries:
+                    print(f"\nSaving {len(final_entries)} new entries to database...")
                     
                     # Save to database
                     db.insert_vocab_entries(
-                        entries=filtered_entries,
+                        entries=final_entries,
                         topic_name=current_topic,
                         category_name=category,
                         target_language=language_to_learn,
@@ -393,11 +423,10 @@ def view_saved_topic_lists():
 def search_node(state: State) -> State:
     """Search node disabled - using direct creative generation"""
     print("🔧 Search node disabled - using direct creative generation")
-    state["search_context"] = ""
     return state
 
 def generation_node(state: State) -> State:
-    """Simple, effective vocabulary generation"""
+    """Simple, effective vocabulary generation with count constraints and 1.5x multiplier"""
     topic = state["topic"]
     level = state["level"]
     target_language = state["target_language"]
@@ -408,35 +437,117 @@ def generation_node(state: State) -> State:
     phrasal_verbs_per_batch = state.get("phrasal_verbs_per_batch", 5)
     idioms_per_batch = state.get("idioms_per_batch", 5)
     
-    print(f"🎯 Generation node: Creating vocabulary for '{topic}'")
+    # Apply 1.5x multiplier to ensure we have enough entries after filtering
+    target_vocab = int(vocab_per_batch * 1.5)
+    target_phrasal = int(phrasal_verbs_per_batch * 1.5)
+    target_idioms = int(idioms_per_batch * 1.5)
     
-    # Simple, direct prompt that actually works
-    prompt = f'''Generate {target_language} vocabulary for {topic} at {level.value} level.
+    print(f"🎯 Generation node: Creating vocabulary for '{topic}'")
+    print(f"📊 Requesting: {target_vocab} vocab, {target_phrasal} phrasal verbs, {target_idioms} idioms")
+    print(f"📊 Target after filtering: {vocab_per_batch} vocab, {phrasal_verbs_per_batch} phrasal verbs, {idioms_per_batch} idioms")
+    
+    # Enhanced prompt with strict count requirements and 1.5x multiplier
+    prompt = f'''You are an expert {target_language} language teacher. Generate vocabulary for "{topic}" at {level.value} level.
 
-Create:
-- {vocab_per_batch} vocabulary words
-- {phrasal_verbs_per_batch} phrasal verbs
-- {idioms_per_batch} idioms
+STRICT COUNT REQUIREMENTS:
+- Generate EXACTLY {target_vocab} vocabulary words (nouns, verbs, adjectives, adverbs)
+- Generate EXACTLY {target_phrasal} phrasal verbs/expressions
+- Generate EXACTLY {target_idioms} idioms/proverbs
 
-Include definitions, examples, and translations to {original_language}.
+QUALITY REQUIREMENTS:
+- All words must be directly relevant to "{topic}"
+- Ensure appropriate difficulty for {level.value} level
+- Generate diverse, engaging, and useful vocabulary
+- Avoid repetition and generic terms
+- Include clear, detailed definitions
+- Provide realistic example sentences
+- Ensure accurate translations
+
+CRITICAL VALIDATION:
+- You MUST generate exactly the specified number of items in each category
+- Count your results carefully before responding
+- If you don't have the exact count, retry and generate more
+- Do not generate more or fewer than requested
+
+For each entry, include:
+- word: the vocabulary word
+- definition: clear definition in {target_language}
+- example: practical example sentence in {target_language}
+- translation: accurate translation to {original_language}
+- example_translation: translation of the example sentence to {original_language}
+- part_of_speech: part of speech (noun, verb, adjective, adverb, etc.)
 
 Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
     
     try:
         import time
-        llm_start = time.time()
-        res = structured_llm.invoke(prompt)
-        llm_time = time.time() - llm_start
-        print(f"⏱️ Generation completed in {llm_time:.2f} seconds")
+        max_attempts = 3
+        attempt = 0
+        
+        while attempt < max_attempts:
+            attempt += 1
+            print(f"🔄 Generation attempt {attempt}/{max_attempts}")
+            
+            llm_start = time.time()
+            res = structured_llm.invoke(prompt)
+            llm_time = time.time() - llm_start
+            print(f"⏱️ Generation completed in {llm_time:.2f} seconds")
+            
+            # Validate counts against 1.5x targets
+            vocab_count = len(res.vocabularies)
+            phrasal_count = len(res.phrasal_verbs)
+            idiom_count = len(res.idioms)
+            
+            print(f"📊 Generated counts:")
+            print(f"   Vocabularies: {vocab_count}/{target_vocab} (target: {vocab_per_batch})")
+            print(f"   Phrasal verbs: {phrasal_count}/{target_phrasal} (target: {phrasal_verbs_per_batch})")
+            print(f"   Idioms: {idiom_count}/{target_idioms} (target: {idioms_per_batch})")
+            
+            # Check if counts match 1.5x requirements
+            counts_match = (
+                vocab_count == target_vocab and
+                phrasal_count == target_phrasal and
+                idiom_count == target_idioms
+            )
+            
+            if counts_match:
+                print("✅ All counts match requirements!")
+                break
+            else:
+                print(f"⚠️ Count mismatch detected. Attempt {attempt}/{max_attempts}")
+                if attempt < max_attempts:
+                    # Add more specific instructions for retry
+                    prompt += f"\n\nRETRY INSTRUCTION: Previous attempt generated {vocab_count} vocabularies, {phrasal_count} phrasal verbs, and {idiom_count} idioms. You need exactly {target_vocab} vocabularies, {target_phrasal} phrasal verbs, and {target_idioms} idioms. Please count carefully and generate the exact numbers requested."
+                else:
+                    print("❌ Max attempts reached. Using generated results as-is.")
         
         # Combine all entries from structured response
         all_entries = res.vocabularies + res.phrasal_verbs + res.idioms
-        print(f"✅ Generated {len(all_entries)} vocabulary entries")
-        print(f"🔍 Vocabularies: {len(res.vocabularies)}")
-        print(f"🔍 Phrasal verbs: {len(res.phrasal_verbs)}")
-        print(f"🔍 Idioms: {len(res.idioms)}")
         
-        state["vocab_entries"] = all_entries
+        # Limit to requested counts (take first N of each type)
+        final_entries = []
+        vocab_added = 0
+        phrasal_added = 0
+        idiom_added = 0
+        
+        for entry in all_entries:
+            if entry.part_of_speech.value == 'phrasal_verb' and phrasal_added < phrasal_verbs_per_batch:
+                final_entries.append(entry)
+                phrasal_added += 1
+            elif entry.part_of_speech.value == 'idiom' and idiom_added < idioms_per_batch:
+                final_entries.append(entry)
+                idiom_added += 1
+            elif entry.part_of_speech.value not in ['phrasal_verb', 'idiom'] and vocab_added < vocab_per_batch:
+                final_entries.append(entry)
+                vocab_added += 1
+        
+        print(f"📊 Final counts after filtering:")
+        print(f"   Vocabularies: {vocab_added}/{vocab_per_batch}")
+        print(f"   Phrasal verbs: {phrasal_added}/{phrasal_verbs_per_batch}")
+        print(f"   Idioms: {idiom_added}/{idioms_per_batch}")
+        print(f"✅ Final result: {len(final_entries)} vocabulary entries")
+        
+        state["vocab_entries"] = final_entries
         return state
         
     except Exception as e:
@@ -478,14 +589,12 @@ def run_single_topic_generation(
     delay_seconds: int = 3,
     save_topic_list: bool = False,
     topic_list_name: str = None,
-    use_search: bool = False,
-    search_context: str = ""
 ):
     """
     Generate vocabulary for a single topic using LangGraph workflow
     """
     print(f"🚀 Starting LangGraph workflow for topic: {topic}")
-    print(f"🔧 Parameters: level={level.value}, use_search={use_search}")
+    print(f"🔧 Parameters: level={level.value}")
     
     # Create initial state
     initial_state = {
@@ -495,8 +604,6 @@ def run_single_topic_generation(
         "original_langauge": learners_native_language,
         "vocab_list": [],
         "vocab_entries": [],
-        "search_context": search_context,  # Use the passed search context
-        "use_search": use_search,
         "vocab_per_batch": vocab_per_batch,
         "phrasal_verbs_per_batch": phrasal_verbs_per_batch,
         "idioms_per_batch": idioms_per_batch
