@@ -13,6 +13,9 @@ class Config:
     LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT", "polynot")
     LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
     
+    # Tavily Search Configuration
+    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+    
     # Supabase Configuration
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
@@ -20,10 +23,10 @@ class Config:
     
     # LLM Configuration
     LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
-    LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))  # Lower temperature for more focused generation
+    LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.9"))  # Lower temperature for more focused generation
     
     # Topic Focus Configuration
-    TOPIC_FOCUS_TEMPERATURE = float(os.getenv("TOPIC_FOCUS_TEMPERATURE", "0.2"))  # Even lower for topic-specific generation
+    TOPIC_FOCUS_TEMPERATURE = float(os.getenv("TOPIC_FOCUS_TEMPERATURE", "0.9"))  # Even lower for topic-specific generation
     
     # Default Language Settings
     LANGUAGE_TO_LEARN = os.getenv("LANGUAGE_TO_LEARN", "English")  # What learners want to learn

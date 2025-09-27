@@ -49,6 +49,10 @@ class PronunciationService:
     async def generate_pronunciations(self, request: PronunciationRequest, user_id: str) -> PronunciationResponse:
         """Generate multiple pronunciation versions for a vocabulary entry"""
         try:
+            # Ensure user exists in profiles table
+            from vocab_api import ensure_user_exists
+            await ensure_user_exists(user_id)
+            
             # Get vocabulary entry
             vocab_entry = await self._get_vocab_entry(request.vocab_entry_id)
             if not vocab_entry:

@@ -10,6 +10,7 @@ import secrets
 import os
 
 # Import your existing modules
+from vocab_agent_react import generate_vocab_with_react_agent, generate_vocab
 from vocab_agent import run_single_topic_generation, run_continuous_vocab_generation, view_saved_topic_lists
 from models import (
     CEFRLevel, VocabListViewRequest, VocabListViewResponse, VocabEntryActionRequest, 
@@ -29,6 +30,9 @@ from tts_service import TTSService
 from pronunciation_service import pronunciation_service
 from voice_cloning_api import router as voice_cloning_router
 # from tts_api import router as tts_router  # Commented out due to path conflict
+
+# Import points integration
+from points_integration import vocab_points, flashcard_points
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -50,6 +54,110 @@ app.add_middleware(
 
 # Initialize database and services
 db = SupabaseVocabDatabase()
+
+# =========== User Vocabulary Tracking Functions ===========
+
+def get_user_seen_vocabularies(user_id: str, days_lookback: int = 5, db_instance=None) -> set:
+    """Get vocabulary words that user has recently seen/generated from generation history only"""
+    try:
+        from datetime import datetime, timedelta
+        from config import Config
+        from supabase import create_client
+        
+        # Calculate cutoff date
+        cutoff_date = datetime.now() - timedelta(days=days_lookback)
+        
+        seen_words = set()
+        
+        # Use service role client to bypass RLS for system operations
+        if Config.SUPABASE_SERVICE_ROLE_KEY:
+            service_client = create_client(Config.SUPABASE_URL, Config.SUPABASE_SERVICE_ROLE_KEY)
+            
+            # Get words from generation history (if table exists)
+            try:
+                history_result = service_client.table("user_generation_history").select("word").eq("user_id", user_id).gte("generated_at", cutoff_date.isoformat()).execute()
+                if history_result.data:
+                    for item in history_result.data:
+                        seen_words.add(item["word"].lower())
+            except Exception as e:
+                print(f"⚠️ Generation history table not available: {e}")
+        else:
+            print("⚠️ Service role key not available for user seen vocabularies")
+        
+        print(f"Found {len(seen_words)} vocabularies seen by user in last {days_lookback} days")
+        return seen_words
+        
+    except Exception as e:
+        print(f"Error getting user seen vocabularies: {e}")
+        return set()
+
+def filter_user_seen_duplicates(entries: list, user_id: str, lookback_days: int = 5) -> list:
+    """Filter out vocabulary entries that user has recently seen"""
+    if not user_id:
+        return entries
+    
+    seen_words = get_user_seen_vocabularies(user_id, lookback_days)
+    
+    if not seen_words:
+        return entries
+    
+    filtered_entries = []
+    for entry in entries:
+        if entry.word.lower() not in seen_words:
+            filtered_entries.append(entry)
+        else:
+            print(f"Filtered user-seen word: {entry.word} (seen in last {lookback_days} days)")
+    
+    print(f"User deduplication: {len(entries)} → {len(filtered_entries)} entries (removed {len(entries) - len(filtered_entries)} recently seen)")
+    return filtered_entries
+
+def track_generated_vocabularies(user_id: str, vocabularies: list, topic: str, level, session_id: str = None) -> bool:
+    """Track vocabularies that were generated and shown to a user"""
+    try:
+        if not user_id or not vocabularies:
+            return False
+            
+        import uuid
+        from datetime import datetime
+        
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        
+        # Prepare batch insert data
+        generation_records = []
+        for vocab in vocabularies:
+            record = {
+                "user_id": user_id,
+                "word": vocab.word.lower(),
+                "topic": topic,
+                "level": level.value if hasattr(level, 'value') else str(level),
+                "generated_at": datetime.now().isoformat(),
+                "session_id": session_id
+            }
+            generation_records.append(record)
+        
+        # Try to insert to user_generation_history table
+        try:
+            from config import Config
+            from supabase import create_client
+            
+            # Use service role client to bypass RLS for system operations
+            if Config.SUPABASE_SERVICE_ROLE_KEY:
+                service_client = create_client(Config.SUPABASE_URL, Config.SUPABASE_SERVICE_ROLE_KEY)
+                service_client.table("user_generation_history").insert(generation_records).execute()
+                print(f"✅ Tracked {len(generation_records)} generated vocabularies for user")
+                return True
+            else:
+                print("⚠️ Service role key not available for tracking")
+                return False
+                
+        except Exception as e:
+            print(f"⚠️ Could not track generation history: {e}")
+            return False
+            
+    except Exception as e:
+        print(f"Error tracking generated vocabularies: {e}")
+        return False
 tts_service = TTSService()
 
 # Include voice cloning router
@@ -617,21 +725,29 @@ def generate_single_topic_sync(
     idioms_per_batch: int,
     delay_seconds: int,
     save_topic_list: bool,
-    topic_list_name: Optional[str]
+    topic_list_name: Optional[str],
+    user_id: Optional[str] = None,
 ):
     """Generate vocabulary for a single topic synchronously"""
     try:
         print(f"Starting single topic generation for: {topic}")
         
         # Import here to avoid circular imports
-        from vocab_agent import structured_llm, db, filter_duplicates, validate_topic_relevance, get_existing_combinations_for_topic
+        from vocab_agent_react import generate_vocab_with_react_agent
+        from vocab_agent import db, filter_duplicates, validate_topic_relevance, get_existing_combinations_for_topic
+        
+        # Direct vocabulary generation (search functionality removed)
+        print(f"\n📚 STANDARD GENERATION")
         
         # Get existing combinations
         existing_combinations = get_existing_combinations_for_topic(topic)
         print(f"Found {len(existing_combinations)} existing combinations")
         
-        # Create prompt
-        prompt = f'''You are an expert {language_to_learn} language teacher creating engaging vocabulary content for {topic}.
+        # Build enhanced prompt for direct generation
+        base_prompt = f'''You are an expert {language_to_learn} language teacher creating engaging vocabulary content for {topic}.'''
+        print(f"\n📝 STANDARD AI PROMPT")
+
+        prompt = f'''{base_prompt}
 
 Generate diverse and interesting {language_to_learn} vocabulary for CEFR level {level.value}:
 
@@ -639,30 +755,106 @@ Generate diverse and interesting {language_to_learn} vocabulary for CEFR level {
 2. {phrasal_verbs_per_batch} {language_to_learn} phrasal verbs/expressions  
 3. {idioms_per_batch} {language_to_learn} idioms/proverbs
 
-Requirements:
+CRITICAL REQUIREMENTS:
 - All words must be relevant to "{topic}"
 - Include clear definitions in {language_to_learn} (the target learning language)
 - Provide example sentences in {language_to_learn}
 - Translate examples to {learners_native_language}
 - Ensure appropriate difficulty for {level.value} level
-- Avoid generic words not specific to the topic
+- Focus on topic-specific vocabulary, not generic words
+- If context provided above, prioritize vocabulary from those materials
 
 Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
 
-        # Generate vocabulary
-        res = structured_llm.invoke(prompt)
+        # DEBUG: Show final prompt structure
+        print(f"\n🔍 FINAL PROMPT ANALYSIS:")
+        print(f"📏 Total prompt length: {len(prompt)} characters")
+        if "IMPORTANT CONTEXT" in prompt:
+            print("✅ Search context IS included in prompt")
+            context_start = prompt.find("IMPORTANT CONTEXT")
+            context_section = prompt[context_start:context_start+300] + "..."
+            print(f"📄 Context section: {context_section}")
+        else:
+            print("❌ Search context NOT found in prompt")
+        print(f"🎯 Prompt starts with: {prompt[:150]}...")
+        print(f"🏁 Prompt ends with: ...{prompt[-100:]}")
+
+        # NEW: Search once, then generate multiple times with the same context
+        print(f"\n🚀 USING SEARCH-ONCE APPROACH")
+        print(f"📋 Parameters:")
+        print(f"   Topic: {topic}")
+        print(f"   Level: {level.value}")
+        print(f"   Target: {vocab_per_batch} vocab + {phrasal_verbs_per_batch} phrasal + {idioms_per_batch} idioms = {vocab_per_batch + phrasal_verbs_per_batch + idioms_per_batch} total")
         
-        # Combine all entries
-        all_entries = res.vocabularies + res.phrasal_verbs + res.idioms
+        # Calculate target total
+        target_total = vocab_per_batch + phrasal_verbs_per_batch + idioms_per_batch
         
-        print(f"Generated {len(all_entries)} entries")
+        # STEP 1: Direct generation (search removed)
+        print(f"\n🔍 STEP 1: Direct vocabulary generation")
         
-        # Validate topic relevance
-        relevant_entries = validate_topic_relevance(all_entries, topic)
-        print(f"Topic-relevant entries: {len(relevant_entries)}")
+        # STEP 2: Pre-filter - check what already exists
+        print(f"\n🔍 STEP 2: Pre-filtering - checking existing entries")
+        existing_combinations = get_existing_combinations_for_topic(topic)
+        print(f"Found {len(existing_combinations)} existing combinations for topic '{topic}'")
         
-        # Filter out duplicates for database storage only
-        filtered_entries = filter_duplicates(relevant_entries, existing_combinations)
+        # Get user seen words (if user authenticated)
+        user_seen_words = set()
+        if user_id:
+            user_seen_words = get_user_seen_vocabularies(user_id, days_lookback=7)
+            print(f"Found {len(user_seen_words)} user-seen words")
+        
+        # STEP 3: Generate using React Agent
+        print(f"\n🚀 STEP 3: Using React Agent for generation")
+        
+        # Use react agent for generation
+        response = generate_vocab_with_react_agent(
+            topic=topic,
+            level=level,
+            target_language=language_to_learn,
+            original_language=learners_native_language,
+            vocab_per_batch=vocab_per_batch,
+            phrasal_verbs_per_batch=phrasal_verbs_per_batch,
+            idioms_per_batch=idioms_per_batch,
+            user_id=user_id or "default_user",
+            ai_role="Language Teacher"
+        )
+        
+        # Extract all entries from the response
+        attempt_entries = response.vocabularies + response.phrasal_verbs + response.idioms
+        print(f"✅ React agent generated {len(attempt_entries)} entries")
+        
+        # Filter out duplicates and user-seen words
+        filtered_entries = []
+        for entry in attempt_entries:
+            # Check if word is user-seen
+            if user_id and entry.word.lower() in user_seen_words:
+                print(f"Filtered user-seen: {entry.word}")
+                continue
+            
+            # Check if word exists in database
+            entry_key = (entry.word.lower(), entry.level.value, entry.part_of_speech.value if entry.part_of_speech else None)
+            if entry_key in [(combo[0].lower(), combo[1], combo[2]) for combo in existing_combinations]:
+                print(f"Filtered duplicate: {entry.word}")
+                continue
+            
+            # Add to filtered list
+            filtered_entries.append(entry)
+        
+        vocab_entries = filtered_entries
+        print(f"✅ Final result: {len(vocab_entries)} entries after filtering")
+        
+        if not vocab_entries:
+            print("⚠️ No vocabulary entries generated by LangGraph workflow")
+            return {
+                "vocabulary": [],
+                "total_generated": 0,
+                "new_entries_saved": 0,
+                "duplicates_found": 0,
+            }
+        
+        # No post-processing needed - filtering is done during generation
+        filtered_entries = vocab_entries
+        print(f"Final result: {len(filtered_entries)} entries (pre-filtered during generation)")
         
         # Save new vocabulary entries to vocab_entries table (but not to user's personal lists)
         inserted_result = None
@@ -687,13 +879,13 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
         
         # Get existing entries from database for duplicates
         existing_entries_map = {}
-        if relevant_entries:  # If we have entries to process, get existing entries from database
+        if filtered_entries:  # If we have entries to process, get existing entries from database
             existing_entries = db.get_vocab_entries(topic_name=topic, limit=1000)
             for existing_entry in existing_entries:
                 existing_entries_map[existing_entry['word'].lower()] = existing_entry['id']
         
-        for entry in relevant_entries:
-            is_duplicate = entry not in filtered_entries
+        for entry in filtered_entries:
+            is_duplicate = False  # All entries from loop are unique
             # Use actual database ID if available (new or existing), otherwise generate a UUID
             if entry.word in inserted_entries_map:
                 entry_id = inserted_entries_map[entry.word]
@@ -720,12 +912,17 @@ Format as JSON with vocabularies, phrasal_verbs, and idioms arrays.'''
         # Note: Vocabulary is saved to vocab_entries table but NOT to user's personal lists
         # Users must explicitly add items to their personal lists
         print(f"Generated {len(response_entries)} entries (saved to vocab_entries, not to personal lists)")
+        
+        # NEW: Track vocabularies shown to user for future deduplication
+        if user_id and response_entries:
+            session_id = str(uuid.uuid4())
+            track_generated_vocabularies(user_id, filtered_entries, topic, level, session_id)
             
         return {
             "vocabulary": response_entries,
             "total_generated": len(response_entries),
             "new_entries_saved": len(filtered_entries),  # Count of new entries saved to vocab_entries
-            "duplicates_found": len(response_entries) - len(filtered_entries)
+            "duplicates_found": len(response_entries) - len(filtered_entries),
         }
             
     except Exception as e:
@@ -1029,10 +1226,13 @@ async def create_test_user(current_user: str = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Error creating test user: {str(e)}")
 
 @app.post("/generate/single", response_model=GenerateResponse, tags=["Generation"])
-async def generate_single_topic(request: GenerateSingleRequest):
-    """Generate vocabulary for a single topic"""
+async def generate_single_topic(
+    request: GenerateSingleRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Generate vocabulary for a single topic with user deduplication"""
     try:
-        # Generate vocabulary synchronously
+        # Generate vocabulary synchronously with user context
         result = generate_single_topic_sync(
             topic=request.topic,
             level=request.level,
@@ -1043,7 +1243,16 @@ async def generate_single_topic(request: GenerateSingleRequest):
             idioms_per_batch=request.idioms_per_batch,
             delay_seconds=request.delay_seconds,
             save_topic_list=request.save_topic_list,
-            topic_list_name=request.topic_list_name
+            topic_list_name=request.topic_list_name,
+            user_id=current_user,
+        )
+        
+        # Award points for vocabulary generation
+        points_result = vocab_points.award_vocab_generation_points(
+            user_name=current_user,
+            words_generated=result["total_generated"],
+            level=request.level.value,
+            session_duration=0  # Could be calculated from start/end time
         )
         
         return GenerateResponse(
@@ -1054,12 +1263,13 @@ async def generate_single_topic(request: GenerateSingleRequest):
                 "topic": request.topic,
                 "level": request.level.value,
                 "language_to_learn": request.language_to_learn,
-                "learners_native_language": request.learners_native_language
+                "learners_native_language": request.learners_native_language,
+                "points_awarded": points_result.get("points", 0) if points_result.get("success") else 0
             },
             generated_vocabulary=result["vocabulary"],
             total_generated=result["total_generated"],
             new_entries_saved=result["new_entries_saved"],
-            duplicates_found=result["duplicates_found"]
+            duplicates_found=result["duplicates_found"],
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
@@ -1082,6 +1292,14 @@ async def generate_multiple_topics(request: GenerateMultipleRequest):
             topic_list_name=request.topic_list_name
         )
         
+        # Award points for vocabulary generation (multiple topics)
+        points_result = vocab_points.award_vocab_generation_points(
+            user_name="system",  # Multiple topics don't have a specific user
+            words_generated=result["total_generated"],
+            level=request.level.value,
+            session_duration=0
+        )
+        
         return GenerateResponse(
             success=True,
             message=f"Generated vocabulary for {len(request.topics)} topics at {request.level.value} level",
@@ -1090,7 +1308,8 @@ async def generate_multiple_topics(request: GenerateMultipleRequest):
                 "topics": request.topics,
                 "level": request.level.value,
                 "language_to_learn": request.language_to_learn,
-                "learners_native_language": request.learners_native_language
+                "learners_native_language": request.learners_native_language,
+                "points_awarded": points_result.get("points", 0) if points_result.get("success") else 0
             },
             generated_vocabulary=result["vocabulary"],
             total_generated=result["total_generated"],
@@ -1124,6 +1343,14 @@ async def generate_category(request: GenerateCategoryRequest):
             delay_seconds=request.delay_seconds
         )
         
+        # Award points for vocabulary generation (category)
+        points_result = vocab_points.award_vocab_generation_points(
+            user_name="system",  # Category generation doesn't have a specific user
+            words_generated=result["total_generated"],
+            level=request.level.value,
+            session_duration=0
+        )
+        
         return GenerateResponse(
             success=True,
             message=f"Generated vocabulary for category '{request.category}' at {request.level.value} level",
@@ -1132,7 +1359,8 @@ async def generate_category(request: GenerateCategoryRequest):
                 "category": request.category,
                 "level": request.level.value,
                 "language_to_learn": request.language_to_learn,
-                "learners_native_language": request.learners_native_language
+                "learners_native_language": request.learners_native_language,
+                "points_awarded": points_result.get("points", 0) if points_result.get("success") else 0
             },
             generated_vocabulary=result["vocabulary"],
             total_generated=result["total_generated"],
@@ -1598,6 +1826,28 @@ async def submit_flashcard_answer(
             request.vocab_entry_id = current_card["vocab_entry_id"]
         
         result = db.submit_flashcard_answer_advanced(session_id, request)
+        
+        # Check if session is completed and award points
+        if result.get("session_complete", False):
+            session = db.get_flashcard_session(session_id)
+            if session:
+                # Calculate difficulty based on session settings
+                difficulty = "medium"  # Default difficulty
+                if hasattr(request, 'difficulty') and request.difficulty:
+                    difficulty = request.difficulty.value.lower()
+                
+                # Award points for flashcard review
+                points_result = flashcard_points.award_flashcard_review_points(
+                    user_name=current_user,
+                    cards_reviewed=session.get("total_cards", 0),
+                    difficulty=difficulty,
+                    mastery_achieved=session.get("correct_answers", 0) >= session.get("total_cards", 0) * 0.8,
+                    streak_days=0  # Could be calculated from user's streak data
+                )
+                
+                # Add points info to result
+                result["points_awarded"] = points_result.get("points", 0) if points_result.get("success") else 0
+                result["points_success"] = points_result.get("success", False)
         
         return {
             "success": True,
@@ -2330,6 +2580,26 @@ async def generate_pronunciations(
     """Generate multiple pronunciation versions for a vocabulary entry"""
     try:
         response = await pronunciation_service.generate_pronunciations(request, current_user)
+        
+        # Award points for pronunciation practice
+        if response and response.success:
+            # Get vocabulary entry to determine level
+            vocab_result = db.client.table("vocab_entries").select("level").eq("id", request.vocab_entry_id).execute()
+            level = vocab_result.data[0]["level"] if vocab_result.data else "A2"
+            
+            # Award points for pronunciation practice
+            points_result = vocab_points.award_pronunciation_points(
+                user_name=current_user,
+                level=level,
+                practice_duration=1  # Assume 1 minute of practice per generation
+            )
+            
+            # Add points info to response
+            if hasattr(response, 'details'):
+                response.details = response.details or {}
+                response.details["points_awarded"] = points_result.get("points", 0) if points_result.get("success") else 0
+                response.details["points_success"] = points_result.get("success", False)
+        
         return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pronunciation generation failed: {str(e)}")
