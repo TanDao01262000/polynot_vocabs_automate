@@ -57,24 +57,32 @@ db = SupabaseVocabDatabase()
 
 # =========== User Vocabulary Tracking Functions ===========
 
-def get_user_seen_vocabularies(user_id: str, days_lookback: int = 5) -> set:
+def get_user_seen_vocabularies(user_id: str, days_lookback: int = 5, db_instance=None) -> set:
     """Get vocabulary words that user has recently seen/generated from generation history only"""
     try:
         from datetime import datetime, timedelta
+        from config import Config
+        from supabase import create_client
         
         # Calculate cutoff date
         cutoff_date = datetime.now() - timedelta(days=days_lookback)
         
         seen_words = set()
         
-        # Get words from generation history (if table exists)
-        try:
-            history_result = db.client.table("user_generation_history").select("word").eq("user_id", user_id).gte("generated_at", cutoff_date.isoformat()).execute()
-            if history_result.data:
-                for item in history_result.data:
-                    seen_words.add(item["word"].lower())
-        except Exception as e:
-            print(f"⚠️ Generation history table not available: {e}")
+        # Use service role client to bypass RLS for system operations
+        if Config.SUPABASE_SERVICE_ROLE_KEY:
+            service_client = create_client(Config.SUPABASE_URL, Config.SUPABASE_SERVICE_ROLE_KEY)
+            
+            # Get words from generation history (if table exists)
+            try:
+                history_result = service_client.table("user_generation_history").select("word").eq("user_id", user_id).gte("generated_at", cutoff_date.isoformat()).execute()
+                if history_result.data:
+                    for item in history_result.data:
+                        seen_words.add(item["word"].lower())
+            except Exception as e:
+                print(f"⚠️ Generation history table not available: {e}")
+        else:
+            print("⚠️ Service role key not available for user seen vocabularies")
         
         print(f"Found {len(seen_words)} vocabularies seen by user in last {days_lookback} days")
         return seen_words
