@@ -437,6 +437,29 @@ async def get_user_saved_vocab(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get user saved vocabulary: {str(e)}")
 
+@app.get("/vocab/{vocab_entry_id}", tags=["User Vocabulary"])
+async def get_vocab_entry(
+    vocab_entry_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Get a specific vocabulary entry by its UUID"""
+    try:
+        # Get the vocabulary entry by ID
+        vocab_entry = db.get_vocab_entry_by_id(vocab_entry_id)
+        
+        if not vocab_entry:
+            raise HTTPException(status_code=404, detail="Vocabulary entry not found")
+        
+        return {
+            "success": True,
+            "message": "Vocabulary entry retrieved successfully",
+            "vocab_entry": vocab_entry
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get vocabulary entry: {str(e)}")
+
 @app.post("/vocab/save-to-user", tags=["User Vocabulary"])
 async def save_vocab_to_user(
     request: dict,
