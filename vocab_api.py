@@ -177,33 +177,84 @@ active_sessions = {}
 async def get_current_user(authorization: Optional[str] = Header(None)) -> str:
     """Extract and validate user from Supabase Auth token"""
     if not authorization:
-        raise HTTPException(status_code=401, detail="Authorization header required")
+        print("❌ AUTH: No authorization header provided")
+        raise HTTPException(
+            status_code=401, 
+            detail="Authorization header required",
+            headers={"error_code": "NO_TOKEN"}
+        )
     
     try:
         # Extract token
-        if authorization.startswith("Bearer "):
-            token = authorization[7:]  # Remove "Bearer " prefix
-        else:
-            token = authorization
+        if not authorization.startswith("Bearer "):
+            print(f"❌ AUTH: Invalid header format: {authorization[:20]}...")
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authorization header format. Expected: Bearer <token>",
+                headers={"error_code": "INVALID_HEADER"}
+            )
+        
+        token = authorization[7:]  # Remove "Bearer " prefix
+        print(f"🔍 AUTH: Validating token (length: {len(token)}): {token[:20]}...{token[-20:]}")
         
         # Validate token directly with Supabase
-        user_response = db.client.auth.get_user(token)
-        
-        if not user_response or not user_response.user:
-            raise HTTPException(status_code=401, detail="Invalid Supabase Auth token")
-        
-        user = user_response.user
-        user_id = user.id
-        
-        # Ensure user exists in vocab database
-        await ensure_user_exists(user_id, user.email)
-        
-        return user_id
+        try:
+            user_response = db.client.auth.get_user(token)
+            
+            if not user_response or not user_response.user:
+                print("❌ AUTH: Supabase returned empty user response")
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid or expired token",
+                    headers={"error_code": "INVALID_TOKEN"}
+                )
+            
+            user = user_response.user
+            user_id = user.id
+            email = getattr(user, 'email', None)
+            
+            print(f"✅ AUTH: Token validated successfully - User ID: {user_id}, Email: {email}")
+            
+            # Ensure user exists in vocab database
+            await ensure_user_exists(user_id, email)
+            
+            return user_id
+            
+        except HTTPException:
+            raise
+        except Exception as auth_error:
+            error_msg = str(auth_error).lower()
+            print(f"❌ AUTH: Supabase validation error: {auth_error}")
+            
+            # Check for specific error types
+            if "expired" in error_msg or "jwt expired" in error_msg:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Token expired. Please refresh your session.",
+                    headers={"error_code": "TOKEN_EXPIRED"}
+                )
+            elif "invalid" in error_msg or "403" in error_msg:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid token. Please login again.",
+                    headers={"error_code": "INVALID_TOKEN"}
+                )
+            else:
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Authentication failed: {auth_error}",
+                    headers={"error_code": "AUTH_FAILED"}
+                )
         
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Authentication verification failed: {str(e)}")
+        print(f"❌ AUTH: Unexpected error: {e}")
+        raise HTTPException(
+            status_code=401,
+            detail=f"Authentication error: {str(e)}",
+            headers={"error_code": "AUTH_ERROR"}
+        )
 
 async def get_current_user_and_client(authorization: Optional[str] = Header(None)) -> tuple[str, any]:
     """Extract and validate user from Supabase Auth token, return user_id and authenticated client"""
@@ -385,6 +436,29 @@ async def get_user_saved_vocab(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get user saved vocabulary: {str(e)}")
+
+@app.get("/vocab/{vocab_entry_id}", tags=["User Vocabulary"])
+async def get_vocab_entry(
+    vocab_entry_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """Get a specific vocabulary entry by its UUID"""
+    try:
+        # Get the vocabulary entry by ID
+        vocab_entry = db.get_vocab_entry_by_id(vocab_entry_id)
+        
+        if not vocab_entry:
+            raise HTTPException(status_code=404, detail="Vocabulary entry not found")
+        
+        return {
+            "success": True,
+            "message": "Vocabulary entry retrieved successfully",
+            "vocab_entry": vocab_entry
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get vocabulary entry: {str(e)}")
 
 @app.post("/vocab/save-to-user", tags=["User Vocabulary"])
 async def save_vocab_to_user(

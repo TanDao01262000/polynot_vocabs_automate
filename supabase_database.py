@@ -2521,3 +2521,36 @@ Do not include any other text or explanations."""
         except Exception as e:
             print(f"Error deleting flashcard session: {e}")
             return False
+    
+    def get_vocab_entry_by_id(self, vocab_entry_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single vocabulary entry by its ID"""
+        try:
+            result = self.client.table("vocab_entries").select("*").eq("id", vocab_entry_id).execute()
+            
+            if not result.data:
+                return None
+            
+            vocab_data = result.data[0]
+            
+            # Format the response similar to other vocab methods
+            vocab_entry = {
+                "id": vocab_data["id"],
+                "word": vocab_data["word"],
+                "definition": vocab_data["definition"],
+                "translation": vocab_data["translation"],
+                "example": vocab_data["example"],
+                "example_translation": vocab_data["example_translation"],
+                "part_of_speech": vocab_data["part_of_speech"],
+                "level": vocab_data["level"],
+                "topic_id": vocab_data["topic_id"],
+                "target_language": vocab_data["target_language"],
+                "original_language": vocab_data["original_language"],
+                "created_at": vocab_data["created_at"],
+                "updated_at": vocab_data["updated_at"]
+            }
+            
+            return vocab_entry
+            
+        except Exception as e:
+            print(f"Error getting vocab entry by ID: {e}")
+            raise
