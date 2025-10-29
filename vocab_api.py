@@ -224,26 +224,47 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> str:
             raise
         except Exception as auth_error:
             error_msg = str(auth_error).lower()
-            print(f"❌ AUTH: Supabase validation error: {auth_error}")
+            error_str = str(auth_error)
             
-            # Check for specific error types
-            if "expired" in error_msg or "jwt expired" in error_msg:
+            # Try to extract message from Supabase exception attributes
+            error_details = ""
+            if hasattr(auth_error, 'message'):
+                error_details = str(auth_error.message).lower()
+            elif hasattr(auth_error, 'msg'):
+                error_details = str(auth_error.msg).lower()
+            
+            combined_error = f"{error_msg} {error_details}".lower()
+            print(f"❌ AUTH: Supabase validation error: {auth_error}")
+            if error_details:
+                print(f"   Error details: {error_details}")
+            
+            # Check for specific error types - be more comprehensive
+            # Supabase can return different error formats for expired tokens
+            if any(keyword in combined_error for keyword in ["expired", "jwt expired", "token is expired", "token has invalid claims"]):
                 raise HTTPException(
                     status_code=401,
-                    detail="Token expired. Please refresh your session.",
-                    headers={"error_code": "TOKEN_EXPIRED"}
+                    detail="Token expired. Please refresh your session or login again.",
+                    headers={"error_code": "TOKEN_EXPIRED", "WWW-Authenticate": "Bearer"}
                 )
-            elif "invalid" in error_msg or "403" in error_msg:
-                raise HTTPException(
-                    status_code=401,
-                    detail="Invalid token. Please login again.",
-                    headers={"error_code": "INVALID_TOKEN"}
-                )
+            elif "invalid" in combined_error or "403" in error_str or "forbidden" in combined_error:
+                # Check if it's specifically an expired token that came as 403
+                if "expired" in combined_error or "token is expired" in error_str:
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Token expired. Please refresh your session or login again.",
+                        headers={"error_code": "TOKEN_EXPIRED", "WWW-Authenticate": "Bearer"}
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Invalid token. Please login again.",
+                        headers={"error_code": "INVALID_TOKEN", "WWW-Authenticate": "Bearer"}
+                    )
             else:
                 raise HTTPException(
                     status_code=401,
                     detail=f"Authentication failed: {auth_error}",
-                    headers={"error_code": "AUTH_FAILED"}
+                    headers={"error_code": "AUTH_FAILED", "WWW-Authenticate": "Bearer"}
                 )
         
     except HTTPException:
@@ -2621,18 +2642,66 @@ async def delete_voice_profile(
     voice_profile_id: str,
     current_user: str = Depends(get_current_user)
 ):
-    """Delete a voice profile"""
+    """Delete a voice profile by database ID or ElevenLabs voice_id"""
     try:
-        # Verify ownership
-        result = db.client.table("user_voice_profiles").select("*").eq("id", voice_profile_id).eq("user_id", current_user).execute()
-        if not result.data:
-            raise HTTPException(status_code=404, detail="Voice profile not found")
+        print(f"🔍 DELETE: Attempting to delete voice profile")
+        print(f"   Profile ID (from URL): {voice_profile_id}")
+        print(f"   Current User: {current_user}")
         
-        # Deactivate the voice profile
-        db.client.table("user_voice_profiles").update({
+        # Use service role client to bypass RLS (same as get_user_voice_profiles)
+        from config import Config
+        from supabase import create_client
+        
+        service_client = None
+        if Config.SUPABASE_SERVICE_ROLE_KEY:
+            service_client = create_client(Config.SUPABASE_URL, Config.SUPABASE_SERVICE_ROLE_KEY)
+        
+        # Use service client if available, otherwise fall back to regular client
+        client_to_use = service_client if service_client else db.client
+        
+        # Try to find by database ID first
+        result = client_to_use.table("user_voice_profiles").select("*").eq("id", voice_profile_id).eq("user_id", current_user).execute()
+        print(f"   Search by ID: Found {len(result.data) if result.data else 0} profiles")
+        
+        # If not found, try to find by voice_id (ElevenLabs voice ID)
+        if not result.data:
+            result = client_to_use.table("user_voice_profiles").select("*").eq("voice_id", voice_profile_id).eq("user_id", current_user).eq("is_active", True).execute()
+            print(f"   Search by voice_id: Found {len(result.data) if result.data else 0} profiles")
+        
+        # Debug: Check what profiles exist for this user
+        if not result.data:
+            all_user_profiles = client_to_use.table("user_voice_profiles").select("*").eq("user_id", current_user).execute()
+            print(f"   Debug: User has {len(all_user_profiles.data) if all_user_profiles.data else 0} total profiles")
+            if all_user_profiles.data:
+                for profile in all_user_profiles.data:
+                    print(f"      - Profile ID: {profile.get('id')}, Voice ID: {profile.get('voice_id')}, Active: {profile.get('is_active')}")
+        
+        if not result.data:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Voice profile not found. Provided ID: {voice_profile_id}, User: {current_user}"
+            )
+        
+        # Get the actual database ID
+        profile_id = result.data[0]["id"]
+        voice_name = result.data[0].get("voice_name", "Unknown")
+        print(f"   ✅ Found profile: {voice_name} (ID: {profile_id})")
+        
+        # Deactivate the voice profile using service client
+        update_result = client_to_use.table("user_voice_profiles").update({
             "is_active": False,
             "updated_at": datetime.now().isoformat()
-        }).eq("id", voice_profile_id).execute()
+        }).eq("id", profile_id).execute()
+        
+        print(f"   ✅ Profile deactivated successfully")
+        
+        # Optionally delete from ElevenLabs (uncomment if you want to delete from ElevenLabs too)
+        # voice_id = result.data[0].get("voice_id")
+        # if voice_id and voice_cloning_service.is_configured:
+        #     try:
+        #         voice_cloning_service._elevenlabs_client.voices.delete(voice_id)
+        #     except Exception as e:
+        #         print(f"⚠️ Warning: Could not delete voice from ElevenLabs: {e}")
         
         return {
             "success": True,
@@ -2642,7 +2711,27 @@ async def delete_voice_profile(
     except HTTPException:
         raise
     except Exception as e:
+        print(f"❌ Error deleting voice profile: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to delete voice profile: {str(e)}")
+
+@app.get("/tts/voice-profiles/debug", tags=["TTS"])
+async def debug_voice_profiles(
+    current_user: str = Depends(get_current_user)
+):
+    """Debug endpoint to see all voice profiles for current user"""
+    try:
+        # Get all profiles (including inactive)
+        result = db.client.table("user_voice_profiles").select("*").eq("user_id", current_user).execute()
+        
+        return {
+            "user_id": current_user,
+            "total_profiles": len(result.data) if result.data else 0,
+            "profiles": result.data if result.data else []
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 # =========== TTS PRONUNCIATION ENDPOINTS ===========
 

@@ -92,7 +92,11 @@ class TTSService:
         """Initialize ElevenLabs client"""
         try:
             if Config.ELEVENLABS_API_KEY:
-                self._elevenlabs_client = ElevenLabs(api_key=Config.ELEVENLABS_API_KEY)
+                # Initialize with API key and optionally base_url if needed
+                client_kwargs = {"api_key": Config.ELEVENLABS_API_KEY}
+                if Config.ELEVENLABS_BASE_URL and Config.ELEVENLABS_BASE_URL != "https://api.elevenlabs.io/v1":
+                    client_kwargs["base_url"] = Config.ELEVENLABS_BASE_URL
+                self._elevenlabs_client = ElevenLabs(**client_kwargs)
                 self._elevenlabs_configured = True
                 print("✅ ElevenLabs client initialized successfully")
             else:
@@ -370,7 +374,7 @@ class TTSService:
                     message="Custom voice not available or not ready"
                 )
             
-            # Configure voice settings
+            # Configure voice settings (only for models that support them)
             voice_settings = VoiceSettings(
                 stability=0.5,
                 similarity_boost=0.5,
@@ -383,6 +387,7 @@ class TTSService:
                 text=request.text,
                 voice_id=voice_profile.voice_id,
                 model_id="eleven_multilingual_v2",
+                voice_settings=voice_settings,
                 output_format="mp3_44100_128"
             )
             

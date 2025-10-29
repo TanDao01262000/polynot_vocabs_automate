@@ -30,7 +30,11 @@ class VoiceCloningService:
         """Initialize ElevenLabs client"""
         try:
             if Config.ELEVENLABS_API_KEY:
-                self._elevenlabs_client = ElevenLabs(api_key=Config.ELEVENLABS_API_KEY)
+                # Initialize with API key and optionally base_url if needed
+                client_kwargs = {"api_key": Config.ELEVENLABS_API_KEY}
+                if Config.ELEVENLABS_BASE_URL and Config.ELEVENLABS_BASE_URL != "https://api.elevenlabs.io/v1":
+                    client_kwargs["base_url"] = Config.ELEVENLABS_BASE_URL
+                self._elevenlabs_client = ElevenLabs(**client_kwargs)
                 print("✅ ElevenLabs client initialized successfully")
             else:
                 print("⚠️ ElevenLabs API key not found")
